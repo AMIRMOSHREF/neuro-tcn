@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neurocontext"
+version = "0.1.0"
+description = "Leakage-safe delay-to-response forecasting and action decoding for four-region spike data"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "matplotlib>=3.10",
+  "numpy>=2.0",
+  "pandas>=2.2",
+  "pyyaml>=6.0",
+  "scikit-learn>=1.6",
+  "scipy>=1.14",
+  "torch>=2.6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3"]
+
+[project.scripts]
+neurocontext = "neurocontext.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
