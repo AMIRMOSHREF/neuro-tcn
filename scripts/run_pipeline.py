@@ -154,6 +154,16 @@ def main() -> None:
     attn = None
     history = []
     metrics = {}
+    history_path = Path(cfg.paths.checkpoint_dir) / "history.json"
+    if args.skip_train and history_path.exists():
+        prior = json.loads(history_path.read_text())
+        if prior:
+            metrics = {
+                "n_train": None,
+                "n_val": prior[-1].get("n_eval"),
+                "best_val_acc": max(h.get("val_acc", 0) for h in prior),
+                "last": prior[-1],
+            }
     if records and not args.skip_train:
         result = train_model(cfg, records, compute_tf=args.tf)
         history = result["history"]
