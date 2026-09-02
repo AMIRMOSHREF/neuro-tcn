@@ -44,6 +44,35 @@ def _encode_payload(payload: dict, label: str, cfg) -> dict | None:
     }
 
 
+def _figure_priors(pop: dict, bin_size: float) -> tuple[dict, dict]:
+    """Stand-in attention / gain when the trained model has a different unit count."""
+    attn, gain = {}, {}
+    for key, pack in pop.items():
+        delay, lick, labels = pack["delay"], pack["lick"], pack["labels"]
+        if delay.size == 0:
+            continue
+        n_u = delay.shape[1]
+        rate = delay.sum(axis=2) / max(delay.shape[2] * bin_size, 1e-6)
+        dprime = np.zeros(n_u)
+        coupling = np.zeros(n_u)
+        for u in range(n_u):
+            fr = rate[:, u]
+            left, right = labels == 1, labels == 2
+            if left.any() and right.any():
+                pos, neg = fr[left], fr[right]
+                v = 0.5 * (pos.var() + neg.var())
+                dprime[u] = abs(pos.mean() - neg.mean()) / np.sqrt(v + 1e-8)
+            a = delay[:, u].mean(0)
+            b = lick[:, u].mean(0)
+            b = np.interp(np.linspace(0, 1, a.size), np.linspace(0, 1, max(b.size, 1)), b)
+            if a.std() > 1e-8 and b.std() > 1e-8:
+                coupling[u] = max(float(np.corrcoef(a, b)[0, 1]), 0.0)
+        z = np.exp(dprime - dprime.max())
+        attn[key] = z / z.sum()
+        gain[key] = coupling * (dprime / (dprime.max() + 1e-8))
+    return attn, gain
+
+
 def figure_scores(cfg, figure_npz: Path):
     data = load_trial_npz(figure_npz)
     label = str(data.get("label", "Right"))
@@ -60,6 +89,7 @@ def figure_scores(cfg, figure_npz: Path):
     if enc0:
         items.append(enc0)
     pop = collect_population(items, cfg.epochs.bin_size)
+    attn, gain = _figure_priors(pop, cfg.epochs.bin_size)
     types = {}
     ids = {}
     if "neuron_type" in data:
@@ -72,7 +102,14 @@ def figure_scores(cfg, figure_npz: Path):
             mask = np.array([normalize_region(str(r)) == key for r in regions])
             types[key] = ntypes[mask]
             ids[key] = uids[mask]
-    scores = select_neurons(pop, cfg, unit_ids_by_region=ids, neuron_types_by_region=types)
+    scores = select_neurons(
+        pop,
+        cfg,
+        attention_by_region=attn,
+        pred_gain_by_region=gain,
+        unit_ids_by_region=ids,
+        neuron_types_by_region=types,
+    )
     return scores, label, data
 
 

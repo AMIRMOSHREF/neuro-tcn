@@ -170,7 +170,7 @@ def _reasons(row: dict[str, float], weights: dict[str, float], ntype: str | None
         bullets.append(
             f"Delay PSTH shape predicts this unit’s lick-period PSTH (r={row['delay_lick_coupling']:.2f})."
         )
-    if row["tf_selectivity"] > 0:
+    if row["tf_selectivity"] > 0.02:
         bullets.append(
             f"Delay-period β/low-γ wavelet power is class-modulated (TF score={row['tf_selectivity']:.2f})."
         )

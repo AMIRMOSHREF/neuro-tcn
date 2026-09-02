@@ -88,7 +88,7 @@ def train_model(cfg, records=None, compute_tf: bool = False) -> dict:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             opt.step()
             bs = batch_dev["label"].size(0)
-            run["total"] += float(losses["total"]) * bs
+            run["total"] += float(losses["total"].detach()) * bs
             run["pred"] += float(losses["pred"]) * bs
             run["cls"] += float(losses["cls"]) * bs
             run["n"] += bs
@@ -98,7 +98,9 @@ def train_model(cfg, records=None, compute_tf: bool = False) -> dict:
             "train_loss": run["total"] / max(run["n"], 1),
             "train_pred": run["pred"] / max(run["n"], 1),
             "train_cls": run["cls"] / max(run["n"], 1),
-            **val,
+            "val_acc": val["val_acc"],
+            "val_pred": val["val_pred"],
+            "n_eval": val["n_eval"],
         }
         history.append(row)
         if val["val_acc"] >= best["val_acc"]:

@@ -88,6 +88,18 @@ Keep the top 18% per region. Penalize units with delay rate &lt; 0.4 Hz.
 
 **Selection is not “high firing.”** A loud tonic cell loses to a quieter delay-choice cell that (a) predicts its own lick-period burst, (b) is class-discriminative, and (c) carries β/low-γ structure the attention gate uses.
 
+## Validation required before the claim is a result
+
+These are design rules, not optional extras:
+
+- Outer split holds out **entire sessions** (and animals when Data2 allows). Hyperparameters and the 18% threshold are chosen only on inner training sessions.
+- Unit IDs are never pooled across sessions. Row 12 in Session1 is not the same cell as row 12 in `sub-440957`.
+- Primary classification: macro-F1 and balanced accuracy with session-clustered bootstrap CIs.
+- Primary forecast: held-out Poisson deviance vs a mean-rate baseline.
+- Null: permute labels and lick rasters within session, then rerun selection.
+- Ablations: rate-only logistic, non-causal TCN, spike-only (no TF), no forecast head, leave-one-region-out.
+- Ignore windows are **go-aligned**. Left/Right windows start at first lick because that is the epoch being forecast; the encoder still never sees those bins.
+
 ## What to report in the paper
 
 1. Figure 1 — full vs selected rasters + reasons (this repo).

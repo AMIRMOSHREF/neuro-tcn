@@ -182,13 +182,20 @@ def discover_trials(cfg: ExperimentConfig) -> list[TrialRecord]:
                 data2_root = demo_data2
 
     meta = cfg.paths.metadata_dir
-    csv_candidates = [
+    local_csv = [
         data2_root / "combined_audited_master_log.csv",
         data2_root / "combined_behavioral_master_log.csv",
-        meta / "combined_audited_master_log.csv",
-        meta / "combined_behavioral_master_log.csv",
-        meta / "behavioral_master_log.csv",
     ]
+    # Prefer logs that live with the NPZs. Bundled metadata/ copies are only
+    # a fallback and must not overwrite demo sessions that reuse real names.
+    if any(p.exists() for p in local_csv):
+        csv_candidates = local_csv
+    else:
+        csv_candidates = [
+            meta / "combined_audited_master_log.csv",
+            meta / "combined_behavioral_master_log.csv",
+            meta / "behavioral_master_log.csv",
+        ]
     logs = load_master_logs(csv_candidates)
     lookup = index_data2_rows(logs) if not logs.empty else {}
 

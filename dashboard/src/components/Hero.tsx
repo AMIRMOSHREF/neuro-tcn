@@ -36,6 +36,9 @@ export function Hero({ nTrials, nSelected, nScored, laterality, metrics }: Props
             Dilated causal convolutions, neuron/temporal attention, and wavelet/STFT
             features read 1.2 s of delay in left/right ALM and striatum, reconstruct the
             lick-period rasters, and classify Ignore / Left / Right without seeing the go cue.
+            Numbers below are from the schema-identical demo until you point the config at
+            the real Data / Data2 disks — held-out accuracy on planted delay-choice cells
+            is not a biological result.
           </p>
         </div>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
