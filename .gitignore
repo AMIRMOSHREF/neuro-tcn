@@ -1,17 +1,23 @@
 __pycache__/
-*.pyc
-*.egg-info/
-build/
-dist/
+*.py[cod]
 .venv/
-venv/
-
-# generated artefacts
-outputs/
-cache/
-synthetic_data/
+.pytest_cache/
+data/demo/
+outputs/checkpoints/
+*.pt
+dashboard/node_modules/
+dashboard/.next/
+dashboard/out/
+.DS_Store
 uploads/
 assets/
+agent-tools/
 terminals/
-*.pt
-*.pth
+
+# DelayCAST generated artefacts
+cache/
+cache_synth/
+synthetic_data/
+outputs_synth/
+outputs/delaycast/
+*.egg-info/

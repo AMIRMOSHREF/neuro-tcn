@@ -1,0 +1,268 @@
+{
+  "n_trials": 96,
+  "catalog_summary": {
+    "Ignore": {
+      "Data": 16,
+      "Data2": 16
+    },
+    "Left": {
+      "Data": 16,
+      "Data2": 16
+    },
+    "Right": {
+      "Data": 16,
+      "Data2": 16
+    }
+  },
+  "metrics": {},
+  "laterality": {
+    "left_ALM_right_pref": 1.0,
+    "right_ALM_left_pref": 1.0,
+    "n_selected_left_ALM": 11,
+    "n_selected_right_ALM": 11
+  },
+  "n_selected": 44,
+  "n_scored": 224,
+  "selected": [
+    {
+      "region": "right Striatum",
+      "unit_id": 219,
+      "local_index": 50,
+      "selected": true,
+      "score": 3.4457198498738273,
+      "dprime": 3.9624403139647555,
+      "delay_lick_coupling": 0.08768941544169148,
+      "tf_selectivity": 0.005872209928929806,
+      "attention": 0.1456522096633412,
+      "prediction_gain": 0.07043294650882787,
+      "delay_rate_hz": 7.894735336303711,
+      "preferred_class": "Left",
+      "neuron_type": "delay_choice",
+      "reasons": "Choice-discriminative delay rate (d\u2032=3.96 vs other actions; prefers Left). | SPEC-TCNN neuron attention is high (a=0.146); the unit is used as past context. | Occluding this unit raises lick-raster prediction error (\u0394MSE gain=0.070). | Ground-truth type: persistent delay-choice cell \u2014 the ALM preparatory motif of Li/Inagaki/Svoboda."
+    },
+    {
+      "region": "left Striatum",
+      "unit_id": 157,
+      "local_index": 44,
+      "selected": true,
+      "score": 3.085208370856111,
+      "dprime": 4.216174045312942,
+      "delay_lick_coupling": 0.03674249477628006,
+      "tf_selectivity": 0.0068318858742713925,
+      "attention": 0.24134626269989648,
+      "prediction_gain": 0.036742494689133536,
+      "delay_rate_hz": 8.201754570007324,
+      "preferred_class": "Right",
+      "neuron_type": "delay_choice",
+      "reasons": "Choice-discriminative delay rate (d\u2032=4.22 vs other actions; prefers Right). | SPEC-TCNN neuron attention is high (a=0.241); the unit is used as past context. | Occluding this unit raises lick-raster prediction error (\u0394MSE gain=0.037). | Ground-truth type: persistent delay-choice cell \u2014 the ALM preparatory motif of Li/Inagaki/Svoboda."
+    },
+    {
+      "region": "right Striatum",
+      "unit_id": 214,
+      "local_index": 45,
+      "selected": true,
+      "score": 2.8476435241510347,
+      "dprime": 4.933260467581784,
+      "delay_lick_coupling": 0.0,
+      "tf_selectivity": 0.004436111822724343,
+      "attention": 0.38453770357930883,
+      "prediction_gain": 0.0,
+      "delay_rate_hz": 7.324560642242432,
+      "preferred_class": "Left",
+      "neuron_type": "delay_choice",
+      "reasons": "Choice-discriminative delay rate (d\u2032=4.93 vs other actions; prefers Left). | SPEC-TCNN neuron attention is high (a=0.385); the unit is used as past context. | Ground-truth type: persistent delay-choice cell \u2014 the ALM preparatory motif of Li/Inagaki/Svoboda."
+    },
+    {
+      "region": "left Striatum",
+      "unit_id": 156,
+      "local_index": 43,
+      "selected": true,
+      "score": 2.8255453712226832,
+      "dprime": 3.6116536261671306,
+      "delay_lick_coupling": 0.1065460726569839,
+      "tf_selectivity": 0.004783571697771549,
+      "attention": 0.13185625554937216,
+      "prediction_gain": 0.09126936324573423,
+      "delay_rate_hz": 8.815789222717285,
+      "preferred_class": "Right",
+      "neuron_type": "delay_choice",
+      "reasons": "Choice-discriminative delay rate (d\u2032=3.61 vs other actions; prefers Right). | SPEC-TCNN neuron attention is high (a=0.132); the unit is used as past context. | Occluding this unit raises lick-raster prediction error (\u0394MSE gain=0.091). | Ground-truth type: persistent delay-choice cell \u2014 the ALM preparatory motif of Li/Inagaki/Svoboda."
+    },
+    {
+      "region": "right ALM",
+      "unit_id": 63,
+      "local_index": 6,
+      "selected": true,
+      "score": 2.651389319327337,
+      "dprime": 8.640501331510961,
+      "delay_lick_coupling": 0.0,
+      "tf_selectivity": 0.0039135335013270375,
+      "attention": 0.6726415936054762,
+      "prediction_gain": 0.0,
+      "delay_rate_hz": 8.377192497253418,
+      "preferred_class": "Left",
+      "neuron_type": "delay_choice",
+      "reasons": "Choice-discriminative delay rate (d\u2032=8.64 vs other actions; prefers Left). | SPEC-TCNN neuron attention is high (a=0.673); the unit is used as past context. | Ground-truth type: persistent delay-choice cell \u2014 the ALM preparatory motif of Li/Inagaki/Svoboda."
+    },
+    {
+      "region": "left ALM",
+      "unit_id": 16,
+      "local_index": 15,
+      "selected": true,
+      "score": 2.4311656626806077,
+      "dprime": 8.728022218454338,
+      "delay_lick_coupling": 0.011059457024363494,
+      "tf_selectivity": 0.006945122592151165,
+      "attention": 0.4361719937374342,
+      "prediction_gain": 0.011059457011692288,
+      "delay_rate_hz": 10.48245620727539,
+      "preferred_class": "Right",
+      "neuron_type": "delay_choice",
+      "reasons": "Choice-discriminative delay rate (d\u2032=8.73 vs other actions; prefers Right). | SPEC-TCNN neuron attention is high (a=0.436); the unit is used as past context. | Occluding this unit raises lick-raster prediction error (\u0394MSE gain=0.011). | Ground-truth type: persistent delay-choice cell \u2014 the ALM preparatory motif of Li/Inagaki/Svoboda."
+    },
+    {
+      "region": "right ALM",
+      "unit_id": 83,
+      "local_index": 26,
+      "selected": true,
+      "score": 2.0365862620064306,
+      "dprime": 3.5606945731177166,
+      "delay_lick_coupling": 0.3317168533088756,
+      "tf_selectivity": 0.0036244152113795282,
+      "attention": 0.004184579870796922,
+      "prediction_gain": 0.13669837376777047,
+      "delay_rate_hz": 8.684210777282715,
+      "preferred_class": "Left",
+      "neuron_type": "delay_choice",
+      "reasons": "Choice-discriminative delay rate (d\u2032=3.56 vs other actions; prefers Left). | Delay PSTH shape predicts this unit\u2019s lick-period PSTH (r=0.33). | SPEC-TCNN neuron attention is high (a=0.004); the unit is used as past context. | Occluding this unit raises lick-raster prediction error (\u0394MSE gain=0.137). | Ground-truth type: persistent delay-choice cell \u2014 the ALM preparatory motif of Li/Inagaki/Svoboda."
+    },
+    {
+      "region": "left ALM",
+      "unit_id": 23,
+      "local_index": 22,
+      "selected": true,
+      "score": 2.0314001991905073,
+      "dprime": 5.967609479481521,
+      "delay_lick_coupling": 0.18541247822121226,
+      "tf_selectivity": 0.008492342382669448,
+      "attention": 0.027594693141406935,
+      "prediction_gain": 0.1267720423623602,
+      "delay_rate_hz": 10.35087776184082,
+      "preferred_class": "Right",
+      "neuron_type": "delay_choice",
+      "reasons": "Choice-discriminative delay rate (d\u2032=5.97 vs other actions; prefers Right). | SPEC-TCNN neuron attention is high (a=0.028); the unit is used as past context. | Occluding this unit raises lick-raster prediction error (\u0394MSE gain=0.127). | Ground-truth type: persistent delay-choice cell \u2014 the ALM preparatory motif of Li/Inagaki/Svoboda."
+    },
+    {
+      "region": "left Striatum",
+      "unit_id": 130,
+      "local_index": 17,
+      "selected": true,
+      "score": 2.0228860163849816,
+      "dprime": 2.295313077659149,
+      "delay_lick_coupling": 0.147873271736888,
+      "tf_selectivity": 0.009315835684537888,
+      "attention": 0.03535259050332842,
+      "prediction_gain": 0.08050318838276324,
+      "delay_rate_hz": 9.429823875427246,
+      "preferred_class": "Right",
+      "neuron_type": "delay_choice",
+      "reasons": "Choice-discriminative delay rate (d\u2032=2.30 vs other actions; prefers Right). | SPEC-TCNN neuron attention is high (a=0.035); the unit is used as past context. | Occluding this unit raises lick-raster prediction error (\u0394MSE gain=0.081). | Ground-truth type: persistent delay-choice cell \u2014 the ALM preparatory motif of Li/Inagaki/Svoboda."
+    },
+    {
+      "region": "left Striatum",
+      "unit_id": 118,
+      "local_index": 5,
+      "selected": true,
+      "score": 1.959404267484003,
+      "dprime": 2.645254129608681,
+      "delay_lick_coupling": 0.11880501787301488,
+      "tf_selectivity": 0.007421290501952171,
+      "attention": 0.050164754898860096,
+      "prediction_gain": 0.07453901444536987,
+      "delay_rate_hz": 8.1578950881958,
+      "preferred_class": "Right",
+      "neuron_type": "delay_choice",
+      "reasons": "Choice-discriminative delay rate (d\u2032=2.65 vs other actions; prefers Right). | SPEC-TCNN neuron attention is high (a=0.050); the unit is used as past context. | Occluding this unit raises lick-raster prediction error (\u0394MSE gain=0.075). | Ground-truth type: persistent delay-choice cell \u2014 the ALM preparatory motif of Li/Inagaki/Svoboda."
+    },
+    {
+      "region": "left ALM",
+      "unit_id": 15,
+      "local_index": 14,
+      "selected": true,
+      "score": 1.9059011112953907,
+      "dprime": 6.449419066400607,
+      "delay_lick_coupling": 0.14251389690131513,
+      "tf_selectivity": 0.011483436450362206,
+      "attention": 0.04467585025346722,
+      "prediction_gain": 0.10530814150943803,
+      "delay_rate_hz": 9.780701637268066,
+      "preferred_class": "Right",
+      "neuron_type": "delay_choice",
+      "reasons": "Choice-discriminative delay rate (d\u2032=6.45 vs other actions; prefers Right). | SPEC-TCNN neuron attention is high (a=0.045); the unit is used as past context. | Occluding this unit raises lick-raster prediction error (\u0394MSE gain=0.105). | Ground-truth type: persistent delay-choice cell \u2014 the ALM preparatory motif of Li/Inagaki/Svoboda."
+    },
+    {
+      "region": "left Striatum",
+      "unit_id": 166,
+      "local_index": 53,
+      "selected": true,
+      "score": 1.6577312339471668,
+      "dprime": 3.112026450545076,
+      "delay_lick_coupling": 0.035262789968768006,
+      "tf_selectivity": 0.010440270602703094,
+      "attention": 0.08000466971058587,
+      "prediction_gain": 0.026028036712614475,
+      "delay_rate_hz": 8.859648704528809,
+      "preferred_class": "Right",
+      "neuron_type": "delay_choice",
+      "reasons": "Choice-discriminative delay rate (d\u2032=3.11 vs other actions; prefers Right). | SPEC-TCNN neuron attention is high (a=0.080); the unit is used as past context. | Occluding this unit raises lick-raster prediction error (\u0394MSE gain=0.026). | Ground-truth type: persistent delay-choice cell \u2014 the ALM preparatory motif of Li/Inagaki/Svoboda."
+    }
+  ],
+  "claims": [
+    {
+      "id": "C1",
+      "title": "A sparse delay-period ensemble forecasts lick-period population activity",
+      "claim": "A minority of ALM and striatal units (~15\u201320% per region) carry a causal predictive code: their delay-epoch spike trains are sufficient to reconstruct lick-epoch rasters in all four regions. Dilated causal convolutions plus neuron attention recover this ensemble without leaking go-cue or lick-time information into the encoder.",
+      "prediction": "Occluding the selected set raises lick-raster Poisson NLL far more than occluding a size-matched random set. Classification accuracy should remain near the full-population ceiling when only selected units are kept.",
+      "literature": "Li, Chen, Svoboda (preparatory ALM); Inagaki et al. (ramping / attractor dynamics)."
+    },
+    {
+      "id": "C2",
+      "title": "Contralateral ALM is preferentially selected for upcoming lick direction",
+      "claim": "Neuron attention and d\u2032 concentrate on left ALM before right licks and on right ALM before left licks. Ignore trials flatten this laterality. The result supports a hemispheric motor-plan code that is already resolved during the delay, not only at movement onset.",
+      "prediction": "A laterality index (selected contralateral minus ipsilateral ALM weight) is positive on Left/Right hits and near zero on Ignore. The same index computed on rejected units is weak.",
+      "literature": "Li et al., Nature 2015/2016; Guo et al., ALM laterality and interhemispheric inhibition."
+    },
+    {
+      "id": "C3",
+      "title": "ALM delay context predicts striatal lick-period firing better than the reverse",
+      "claim": "Cross-region prediction (delay ALM \u2192 lick STR) outperforms delay STR \u2192 lick ALM. This is the expected cortico-striatal hierarchy: ALM holds the plan; striatum expresses the selected action once the go cue arrives.",
+      "prediction": "In a 2\u00d72 transfer matrix of {ALM, STR} delay \u2192 {ALM, STR} lick, the ALM\u2192STR off-diagonal exceeds STR\u2192ALM. Attention mass in late delay sits more on ALM than on STR.",
+      "literature": "Hintiryan / Hintiryan-style ALM\u2013DMS projections; same-task DMS choice signals."
+    },
+    {
+      "id": "C4",
+      "title": "The last ~300\u2013400 ms of delay is the dominant causal context",
+      "claim": "Temporal attention, constrained to be causal, peaks in the pre-go ramp \u2014 not uniformly across the 1.2 s delay. That window is when preparatory activity becomes choice-specific enough to forecast both the lick-period burst and the 3-class action.",
+      "prediction": "Truncating the encoder to the first 800 ms of delay drops accuracy more than dropping the first 800 ms and keeping the last 400 ms. Attention center-of-mass lies after 0.8 s.",
+      "literature": "Inagaki, Chen, Svoboda \u2014 discrete attractor + ramping into the go cue."
+    },
+    {
+      "id": "C5",
+      "title": "Delay \u03b2 / low-\u03b3 wavelet structure marks the same units attention selects",
+      "claim": "Selected neurons show class-modulated Morlet CWT power in 12\u201345 Hz during delay. Fusing STFT/CWT with the spike TCNN improves both lick-raster prediction and Ignore/Left/Right decoding relative to a spike-only ablation.",
+      "prediction": "\u0394accuracy of the TF branch is largest for ALM delay-choice cells and near zero for tonic unselective cells. Beta energy d\u2032 correlates with neuron-attention rank.",
+      "literature": "Motor beta as holding / status-quo; gamma as readout / movement preparation."
+    },
+    {
+      "id": "C6",
+      "title": "The selected set is shared across Data and Data2 after CSV-consistent labeling",
+      "claim": "When Data2 trials are labeled from audited master logs (exclude photostim, early lick, bilateral licks) and Data trials from class folders, the same functional types (delay-choice, delay-ramp) dominate selection in both corpora. That is evidence for a task-general cortico-striatal predictive subspace, not a session artifact.",
+      "prediction": "Jaccard overlap of selected functional types (not raw unit IDs) between datasets exceeds a label-shuffled null. Cross-dataset training (train Data, test Data2 and reverse) degrades less for the selected subset than for the full population.",
+      "literature": "International Brain Lab / multi-animal generalization of choice circuits."
+    }
+  ],
+  "figures": {
+    "selection": "figures/fig1_neuron_selection.png",
+    "schematic": "figures/fig0_spec_tcnn_schematic.png"
+  }
+}

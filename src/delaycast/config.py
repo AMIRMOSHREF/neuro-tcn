@@ -54,7 +54,7 @@ def _parse_scalar(text: str) -> Any:
 
 def load_config(path: str | Path | None, overrides: list[str] | None = None) -> Config:
     if path is None:
-        path = Path(__file__).resolve().parent.parent / "configs" / "default.yaml"
+        path = Path(__file__).resolve().parents[2] / "configs" / "delaycast.yaml"
     with open(path, "r", encoding="utf-8") as f:
         cfg = Config(yaml.safe_load(f) or {})
     for ov in overrides or []:

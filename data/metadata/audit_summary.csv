@@ -1,0 +1,12 @@
+session,n_start,n_kept,n_excluded,excl_miss_trial,excl_photostim_trial,excl_early_lick_trial,excl_auto_or_free_water,excl_both_left_and_right_licks
+sub-442571_ses-20190227T134351_behavior+ecephys+image+ogen,540,296,244,106,97,41,,
+sub-442571_ses-20190303T144606_behavior+ecephys+image+ogen,692,457,235,65,118,52,,
+sub-442571_ses-20190228T140832_behavior+ecephys+image+ogen,460,290,170,37,106,27,,
+sub-442571_ses-20190302T150148_behavior+ecephys+image+ogen,501,318,183,55,86,42,,
+sub-440958_ses-20190215T141028_behavior+ecephys+image+ogen,530,305,225,69,103,51,1.0,1.0
+sub-440958_ses-20190213T115547_behavior+ecephys+image+ogen,521,315,206,98,65,12,,31.0
+sub-440958_ses-20190217T154414_behavior+ecephys+image+ogen,590,322,268,129,94,43,,2.0
+sub-440958_ses-20190214T123412_behavior+ecephys+image+ogen,520,341,179,92,57,20,1.0,9.0
+sub-440956_ses-20190207T120657_behavior+ecephys+image+ogen,368,154,214,135,48,15,8.0,8.0
+sub-440957_ses-20190212T153751_behavior+ecephys+image+ogen,531,381,150,60,80,9,1.0,
+sub-440957_ses-20190211T143614_behavior+ecephys+image+ogen,520,358,162,91,64,3,,4.0

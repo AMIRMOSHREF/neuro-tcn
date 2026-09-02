@@ -1,27 +1,27 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "delaycast"
-version = "0.1.0"
-description = "DelayCAST: delay-epoch causal attention + spectro-temporal neuron selection for ALM/striatum lick decoding"
+name = "rodent-tcnn"
+version = "1.0.0"
+description = "SPEC-TCNN: delay-to-lick cortico-striatal neuron selection"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "numpy>=1.26",
-    "pandas>=2.1",
-    "scipy>=1.11",
-    "scikit-learn>=1.3",
-    "matplotlib>=3.8",
-    "PyWavelets>=1.5",
-    "pyyaml>=6.0",
-    "tqdm>=4.66",
-    "torch>=2.1",
+  "numpy>=1.26",
+  "scipy>=1.11",
+  "pandas>=2.1",
+  "matplotlib>=3.8",
+  "pyyaml>=6.0",
+  "scikit-learn>=1.3",
+  "PyWavelets>=1.5",
+  "tqdm>=4.66",
+  "torch>=2.2",
 ]
 
 [project.scripts]
 delaycast = "delaycast.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["delaycast*"]
+where = ["src"]

@@ -15,6 +15,7 @@ sessions of both datasets, which is what allows joint training on ``Data`` and `
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -34,7 +35,25 @@ class ModelOutput:
     self_attn: dict[str, torch.Tensor]          # region -> (B, T, T) causal attention maps
     region_attn: torch.Tensor                   # (B, R) cross-region pooling weights
     gates: dict[str, torch.Tensor]              # region -> (K,) neuron gates of the batch's session
-    gate_l1: torch.Tensor
+    gate_l1: torch.Tensor                       # mean over regions of the summed gate mass
+
+
+class NormalizedReadIn(nn.Module):
+    """1x1 convolution whose weight column for every input channel has unit L2 norm.
+
+    Without this the read-in could absorb any rescaling of the neuron gates, which would make the
+    gates meaningless as importance scores; with it the gate is the only per-neuron scale factor.
+    """
+
+    def __init__(self, c_in: int, d_model: int):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(d_model, c_in) / math.sqrt(c_in))
+        self.bias = nn.Parameter(torch.zeros(d_model))
+        self.scale = nn.Parameter(torch.ones(()))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, C, T)
+        w = self.weight / (self.weight.norm(dim=0, keepdim=True) + 1e-6)
+        return F.conv1d(x, (self.scale * w)[:, :, None], self.bias)
 
 
 class SessionAdapter(nn.Module):
@@ -42,12 +61,12 @@ class SessionAdapter(nn.Module):
 
     def __init__(self, k: int, n_spec: int, d_model: int, t_tgt: int):
         super().__init__()
-        self.gates = nn.ModuleDict({r: NeuronGate(k) for r in REGIONS})
-        self.read_in = nn.ModuleDict({r: nn.Conv1d(k + n_spec, d_model, 1) for r in REGIONS})
+        self.gates = nn.ModuleDict({r: NeuronGate(k, init=1.0) for r in REGIONS})
+        self.read_in = nn.ModuleDict({r: NormalizedReadIn(k + n_spec, d_model) for r in REGIONS})
         self.read_out = nn.ModuleDict({r: nn.Linear(d_model, k) for r in REGIONS})
         self.log_base = nn.ParameterDict({r: nn.Parameter(torch.zeros(k)) for r in REGIONS})
         # Persistence path: weight of each neuron's own late-delay log-rate in its response forecast.
-        self.persist = nn.ParameterDict({r: nn.Parameter(torch.ones(k)) for r in REGIONS})
+        self.persist = nn.ParameterDict({r: nn.Parameter(torch.zeros(k)) for r in REGIONS})
 
 
 class DelayCASTNet(nn.Module):

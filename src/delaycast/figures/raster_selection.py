@@ -45,13 +45,13 @@ def _shade_epochs(ax, ep, t0):
             ax.axvline(ep[k] - t0, color="k", ls=":", lw=0.8, zorder=3)
 
 
-def _badges(ax, row: pd.Series, x: float, y: float, w: float = 0.07, h: float = 0.8):
+def _badges(ax, row: pd.Series, x: float, y: float, w: float = 0.13, h: float = 0.8):
     """Four small squares (S C W R) right of a raster row; filled when the criterion is satisfied."""
     for j, (col, letter, _) in enumerate(CRITERIA):
         on = bool(row[col])
         ax.add_patch(Rectangle((x + j * w * 1.2, y - h / 2), w, h, transform=ax.transData,
                                facecolor="#333333" if on else "white", edgecolor="#333333", lw=0.5, clip_on=False, zorder=6))
-        ax.text(x + j * w * 1.2 + w / 2, y, letter, ha="center", va="center", fontsize=5,
+        ax.text(x + j * w * 1.2 + w / 2, y, letter, ha="center", va="center", fontsize=5.5,
                 color="white" if on else "#999999", zorder=7, clip_on=False)
 
 
@@ -86,8 +86,9 @@ def plot_raster_selection(npz_path, cache: SessionCache, table: pd.DataFrame, cf
     x_max = (ep["go_start_times"] - t0) + 1.6
     counts = {r: len(per_region[r]) for r in REGIONS}
 
-    fig = plt.figure(figsize=(15, 11))
-    gs = GridSpec(6, 3, figure=fig, width_ratios=[1.35, 0.9, 1.0], height_ratios=[1, 1, 1, 1, 0.95, 0.05], hspace=0.45, wspace=0.3)
+    fig = plt.figure(figsize=(16, 12))
+    gs = GridSpec(6, 3, figure=fig, width_ratios=[1.35, 0.95, 1.0], height_ratios=[1, 1, 1, 1, 1.0, 0.05], hspace=0.5, wspace=0.42,
+                  left=0.06, right=0.98, top=0.90, bottom=0.03)
 
     # ---- A: all neurons, selected highlighted -----------------------------------------------
     axes_a = []
@@ -112,12 +113,12 @@ def plot_raster_selection(npz_path, cache: SessionCache, table: pd.DataFrame, cf
         if lk.size:
             axes_a[0].vlines(lk - t0, counts[REGIONS[0]] * 1.02, counts[REGIONS[0]] * 1.10, color=CLASS_COLORS[name], lw=1.0, clip_on=False)
             axes_a[0].text(x_max, counts[REGIONS[0]] * 1.06, f"{name.lower()} licks", color=CLASS_COLORS[name], fontsize=7, va="center", ha="left")
-    for k, lab in (("sample_start_times", "sample"), ("delay_start_times", "delay"), ("go_start_times", "go")):
+    for k, lab in (("sample_start_times", "sample"), ("delay_start_times", "delay"), ("go_start_times", "go cue")):
         if not np.isnan(ep[k]):
-            axes_a[0].text(ep[k] - t0, counts[REGIONS[0]] * 1.14, lab, ha="center", fontsize=7.5, clip_on=False)
+            axes_a[0].text(ep[k] - t0, counts[REGIONS[0]] * 1.14, lab, ha="center", fontsize=7.5, clip_on=False, style="italic")
     axes_a[-1].set_xlabel("Time from delay onset (s)")
-    axes_a[0].set_title(f"All recorded units, one trial ({trial_label}); selected units in colour", loc="left")
-    panel_label(axes_a[0], "A", y=1.22)
+    axes_a[0].set_title(f"All recorded units, one trial ({trial_label}); selected units in colour", loc="left", pad=22)
+    panel_label(axes_a[0], "A", y=1.3)
 
     # ---- B: selected neurons only, sorted by score, with criterion badges ---------------------
     axes_b = []
@@ -138,8 +139,8 @@ def plot_raster_selection(npz_path, cache: SessionCache, table: pd.DataFrame, cf
         if i < 3:
             plt.setp(ax.get_xticklabels(), visible=False)
     axes_b[-1].set_xlabel("Time from delay onset (s)")
-    axes_b[0].set_title("Selected units (rank-ordered) with criterion badges  S C W R", loc="left")
-    panel_label(axes_b[0], "B", y=1.22)
+    axes_b[0].set_title("Selected units, rank-ordered\nbadges: S selectivity · C coupling · W wavelet · R ramp", loc="left", pad=8)
+    panel_label(axes_b[0], "B", y=1.3)
 
     # ---- C: score bars for the selected units --------------------------------------------------
     ax_c = fig.add_subplot(gs[0:2, 2])
@@ -150,8 +151,8 @@ def plot_raster_selection(npz_path, cache: SessionCache, table: pd.DataFrame, cf
     ax_c.set_yticklabels([f"{REGION_LABELS[r].split()[0][0]}{REGION_LABELS[r].split()[1][:3]} u{u}" for r, u in zip(sel_tab.region, sel_tab.unit_id)], fontsize=5.5)
     ax_c.invert_yaxis()
     ax_c.set_xlabel("combined score  Σ w·(−log10 q)")
-    ax_c.set_title("Selection score per selected unit", loc="left")
-    panel_label(ax_c, "C", x=-0.25)
+    ax_c.set_title("Selection score per selected unit", loc="left", pad=8)
+    panel_label(ax_c, "C", x=-0.22, y=1.08)
 
     # ---- D: class-conditional delay PSTH of the top unit of every region ----------------------
     y = cache.labels
@@ -160,29 +161,34 @@ def plot_raster_selection(npz_path, cache: SessionCache, table: pd.DataFrame, cf
     tvec = (np.arange(t_ctx) + 0.5) * cache.bin_ms / 1000.0
     t_tgt = cache.target[REGIONS[0]].shape[2]
     tvec_t = 1.2 + (np.arange(t_tgt) + 0.5) * cache.target_bin_ms / 1000.0
+    from matplotlib.lines import Line2D
     for ax, pair in zip(ax_d, (REGIONS[:2], REGIONS[2:])):
+        names = []
         for r in pair:
             top = table[(table.region == r) & table.selected].sort_values("rank").head(1)
             if not len(top):
                 continue
             u = int(top.unit_index.iloc[0])
+            ls = "-" if r.endswith("L") else "--"
+            names.append(f"{REGION_LABELS[r]} u{top.unit_id.iloc[0]} ({'solid' if ls == '-' else 'dashed'})")
             for c_i, c in enumerate(CLASSES):
                 m = y == c_i
                 if not m.any():
                     continue
                 psth = smooth_rates(cache.context[r][m, u].mean(0), cache.bin_ms, cfg.data.smoothing_sigma_ms)
                 psth_t = cache.target[r][m, u].mean(0) / (cache.target_bin_ms / 1000.0)
-                ls = "-" if r.endswith("L") else "--"
-                ax.plot(tvec, psth, color=CLASS_COLORS[c], ls=ls, lw=1.2, label=f"{REGION_LABELS[r]} u{top.unit_id.iloc[0]} · {c}")
+                ax.plot(tvec, psth, color=CLASS_COLORS[c], ls=ls, lw=1.2)
                 ax.plot(tvec_t, psth_t, color=CLASS_COLORS[c], ls=ls, lw=1.2, alpha=0.6)
         ax.axvspan(0, 1.2, color=EPOCH_COLORS["delay"], zorder=0, lw=0)
         ax.axvspan(1.2, 1.2 + t_tgt * cache.target_bin_ms / 1000.0, color=EPOCH_COLORS["response"], zorder=0, lw=0)
         ax.axvline(1.2, color="k", ls=":", lw=0.8)
         ax.set_ylabel("rate (Hz)")
-        ax.legend(fontsize=5.5, ncol=2, loc="upper left")
-    ax_d[0].set_title("Top-ranked unit per region: class-conditional PSTH (delay → response)", loc="left")
+        ax.text(0.01, 0.98, "\n".join(names), transform=ax.transAxes, fontsize=6.3, va="top", ha="left")
+    class_handles = [Line2D([], [], color=CLASS_COLORS[c], lw=1.4, label=c) for c in CLASSES]
+    ax_d[0].legend(handles=class_handles, fontsize=6.5, ncol=3, loc="upper right")
+    ax_d[0].set_title("Top-ranked unit per region: class-conditional PSTH (delay → response)", loc="left", pad=8)
     ax_d[1].set_xlabel("Time from delay onset (s)")
-    panel_label(ax_d[0], "D", x=-0.25)
+    panel_label(ax_d[0], "D", x=-0.22, y=1.08)
 
     # ---- E: bullet reasons ----------------------------------------------------------------------
     ax_e = fig.add_subplot(gs[4, :])
@@ -190,12 +196,12 @@ def plot_raster_selection(npz_path, cache: SessionCache, table: pd.DataFrame, cf
     bullets = selection_bullets(table, cfg)
     text = "\n".join("• " + b for b in bullets)
     ax_e.text(0.0, 1.0, "Why these units were selected", fontsize=9.5, fontweight="bold", va="top", transform=ax_e.transAxes)
-    ax_e.text(0.0, 0.86, text, fontsize=6.9, va="top", transform=ax_e.transAxes, family="DejaVu Sans", wrap=True)
+    ax_e.text(0.0, 0.88, text, fontsize=6.9, va="top", transform=ax_e.transAxes, family="DejaVu Sans", wrap=True, linespacing=1.35)
     panel_label(ax_e, "E", x=-0.02, y=0.98)
 
-    handles = [Patch(color=EPOCH_COLORS[k], label=k) for k in EPOCH_COLORS]
-    fig.legend(handles=handles, loc="lower right", ncol=3, bbox_to_anchor=(0.99, 0.005))
-    fig.suptitle(f"Criterion-based neuron selection — session {cache.session}", fontsize=12, y=0.995)
+    handles = [Patch(color=EPOCH_COLORS[k], label=f"{k} epoch") for k in EPOCH_COLORS]
+    fig.legend(handles=handles, loc="lower right", ncol=3, bbox_to_anchor=(0.98, 0.005))
+    fig.suptitle(f"Criterion-based neuron selection — session {cache.session}", fontsize=12.5, y=0.985)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=int(cfg.figures.dpi))

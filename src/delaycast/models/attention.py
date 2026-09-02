@@ -28,7 +28,8 @@ class NeuronGate(nn.Module):
         return x * self.gates()[None, :, None]
 
     def l1(self) -> torch.Tensor:
-        return self.gates().mean()
+        """Summed gate mass (so the pressure per neuron does not vanish as K grows)."""
+        return self.gates().sum()
 
 
 class CausalTemporalAttention(nn.Module):

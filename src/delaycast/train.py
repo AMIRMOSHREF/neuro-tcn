@@ -96,7 +96,12 @@ def fit(model: DelayCASTNet, train_ds: TrialDataset, val_ds: TrialDataset, cfg: 
         epochs: int | None = None, tag: str = "train") -> pd.DataFrame:
     epochs = epochs or int(cfg.train.epochs)
     params = list(params) if params is not None else list(model.parameters())
-    opt = torch.optim.AdamW(params, lr=float(cfg.train.lr), weight_decay=float(cfg.train.weight_decay))
+    # Neuron gates get a larger learning rate and no weight decay so that they can actually move
+    # towards 0/1 within a short training run (weight decay would pull the logits towards 0.5).
+    gate_ids = {id(p) for n, p in model.named_parameters() if ".gates." in n}
+    groups = [{"params": [p for p in params if id(p) not in gate_ids], "lr": float(cfg.train.lr), "weight_decay": float(cfg.train.weight_decay)},
+              {"params": [p for p in params if id(p) in gate_ids], "lr": float(cfg.train.lr) * float(cfg.train.get_path("gate_lr_mult", 10.0)), "weight_decay": 0.0}]
+    opt = torch.optim.AdamW([g for g in groups if g["params"]])
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
     cw = class_weights(train_ds.labels()).to(device)
     train_loader = make_loader(train_ds, cfg, shuffle=True)
