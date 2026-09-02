@@ -68,7 +68,7 @@ def plot_attention(attention_npz: Path, selections: dict[str, pd.DataFrame], uni
             ax_g.text(0.02, 0.02, f"Spearman ρ = {rho:.2f}, p = {p:.2g}", transform=ax_g.transAxes, fontsize=7.5)
     ax_g.set_xlabel("statistical selection score")
     ax_g.set_ylabel("learned neuron gate")
-    ax_g.set_title("Model gates vs criteria score (selected units)", loc="left")
+    ax_g.set_title("Learned gates vs criteria score", loc="left")
     panel_label(ax_g, "C")
     # Gate distributions per region.
     ax_h = axes[1, 2]

@@ -1,0 +1,173 @@
+{
+  "classification": {
+    "accuracy": 0.8541666666666666,
+    "balanced_accuracy": 0.8333333333333334,
+    "macro_f1": 0.8273147096676509,
+    "n": 48
+  },
+  "confusion": [
+    [
+      6,
+      2,
+      0
+    ],
+    [
+      2,
+      18,
+      0
+    ],
+    [
+      1,
+      2,
+      17
+    ]
+  ],
+  "per_session": [
+    {
+      "session": "A/Session1",
+      "accuracy": 1.0,
+      "balanced_accuracy": 1.0,
+      "macro_f1": 1.0,
+      "n": 12
+    },
+    {
+      "session": "A/Session2",
+      "accuracy": 1.0,
+      "balanced_accuracy": 1.0,
+      "macro_f1": 1.0,
+      "n": 12
+    },
+    {
+      "session": "B/sub-990000_ses-20190301T120000",
+      "accuracy": 0.6666666666666666,
+      "balanced_accuracy": 0.6333333333333333,
+      "macro_f1": 0.6257575757575758,
+      "n": 12
+    },
+    {
+      "session": "B/sub-990001_ses-20190302T120000",
+      "accuracy": 0.75,
+      "balanced_accuracy": 0.7000000000000001,
+      "macro_f1": 0.7053872053872053,
+      "n": 12
+    }
+  ],
+  "chance_balanced_accuracy": {
+    "mean": 0.3325000000000001,
+    "p95": 0.44458333333333344
+  },
+  "forecast": {
+    "deviance_explained_ALM_L": 0.030674997934740156,
+    "deviance_explained_persistence_ALM_L": -0.7784845165804386,
+    "deviance_explained_ALM_R": 0.021901376388231752,
+    "deviance_explained_persistence_ALM_R": -0.9025224844525364,
+    "deviance_explained_STR_L": 0.03833653022759187,
+    "deviance_explained_persistence_STR_L": -0.9579174600181353,
+    "deviance_explained_STR_R": 0.032716718572073256,
+    "deviance_explained_persistence_STR_R": -0.7727548769515615
+  },
+  "context_sweep": [
+    {
+      "context_ms": 100,
+      "accuracy": 0.6875,
+      "balanced_accuracy": 0.75,
+      "macro_f1": 0.6642857142857143,
+      "n": 48
+    },
+    {
+      "context_ms": 200,
+      "accuracy": 0.8125,
+      "balanced_accuracy": 0.8250000000000001,
+      "macro_f1": 0.7907381065275803,
+      "n": 48
+    },
+    {
+      "context_ms": 300,
+      "accuracy": 0.7916666666666666,
+      "balanced_accuracy": 0.7833333333333333,
+      "macro_f1": 0.7608685608685608,
+      "n": 48
+    },
+    {
+      "context_ms": 400,
+      "accuracy": 0.8333333333333334,
+      "balanced_accuracy": 0.8166666666666668,
+      "macro_f1": 0.799370220422852,
+      "n": 48
+    },
+    {
+      "context_ms": 600,
+      "accuracy": 0.8958333333333334,
+      "balanced_accuracy": 0.8666666666666667,
+      "macro_f1": 0.8587429837146668,
+      "n": 48
+    },
+    {
+      "context_ms": 800,
+      "accuracy": 0.8958333333333334,
+      "balanced_accuracy": 0.8666666666666667,
+      "macro_f1": 0.8587429837146668,
+      "n": 48
+    },
+    {
+      "context_ms": 1000,
+      "accuracy": 0.9166666666666666,
+      "balanced_accuracy": 0.8833333333333333,
+      "macro_f1": 0.8828955597248281,
+      "n": 48
+    },
+    {
+      "context_ms": 1200,
+      "accuracy": 0.8541666666666666,
+      "balanced_accuracy": 0.8333333333333334,
+      "macro_f1": 0.8273147096676509,
+      "n": 48
+    }
+  ],
+  "region_ablation": [
+    {
+      "dropped_region": "ALM_L",
+      "accuracy": 0.5208333333333334,
+      "balanced_accuracy": 0.5166666666666666,
+      "macro_f1": 0.44670494941208644,
+      "n": 48
+    },
+    {
+      "dropped_region": "ALM_R",
+      "accuracy": 0.5,
+      "balanced_accuracy": 0.5,
+      "macro_f1": 0.46759259259259256,
+      "n": 48
+    },
+    {
+      "dropped_region": "STR_L",
+      "accuracy": 0.4375,
+      "balanced_accuracy": 0.525,
+      "macro_f1": 0.440491452991453,
+      "n": 48
+    },
+    {
+      "dropped_region": "STR_R",
+      "accuracy": 0.7291666666666666,
+      "balanced_accuracy": 0.7083333333333334,
+      "macro_f1": 0.7259001161440185,
+      "n": 48
+    }
+  ],
+  "baselines": [
+    {
+      "model": "logreg_all_units",
+      "accuracy": 1.0,
+      "balanced_accuracy": 1.0,
+      "macro_f1": 1.0,
+      "n": 48
+    },
+    {
+      "model": "logreg_selected_units",
+      "accuracy": 1.0,
+      "balanced_accuracy": 1.0,
+      "macro_f1": 1.0,
+      "n": 48
+    }
+  ]
+}
