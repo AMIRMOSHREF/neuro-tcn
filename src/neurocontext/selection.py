@@ -11,13 +11,15 @@ from .data import TrialRecord, load_trial
 from .model import ContextForecaster
 
 
-def load_model(checkpoint: str | Path, device: torch.device) -> tuple[ContextForecaster, dict]:
+def load_model(
+    checkpoint: str | Path, device: torch.device
+) -> tuple[ContextForecaster, dict, dict]:
     state = torch.load(checkpoint, map_location=device, weights_only=False)
     config = state["config"]
     model = ContextForecaster(config).to(device)
     model.load_state_dict(state["model_state"])
     model.eval()
-    return model, config
+    return model, config, state
 
 
 def _eta_squared(values: list[float], labels: list[int]) -> float:
@@ -40,7 +42,10 @@ def rank_neurons(
 ) -> list[dict]:
     """Aggregate learned gates by session-unit without mixing unit identities."""
     device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
-    model, config = load_model(checkpoint, device)
+    model, config, state = load_model(checkpoint, device)
+    training_groups = set(state.get("train_groups", []))
+    if training_groups:
+        records = [record for record in records if record.group in training_groups]
     observations: defaultdict[tuple, dict[str, list]] = defaultdict(
         lambda: {"gate": [], "rate": [], "label": [], "peak_bin": [], "top": []}
     )
@@ -53,11 +58,16 @@ def rank_neurons(
         output = model(delay, mask)
         gates = output["neuron_gate"][0].cpu().numpy()
         temporal = output["temporal_attention"][0].cpu().numpy()
-        active_scores = gates[sample["unit_mask"].numpy()]
-        threshold = np.quantile(active_scores, 1 - top_fraction) if len(active_scores) else np.inf
         unit_ids = sample["unit_ids"]
         for region_idx, region in enumerate(config["regions"]):
-            for unit_idx in np.flatnonzero(sample["unit_mask"][region_idx].numpy()):
+            active_indices = np.flatnonzero(sample["unit_mask"][region_idx].numpy())
+            active_scores = gates[region_idx, active_indices]
+            threshold = (
+                np.quantile(active_scores, 1 - top_fraction)
+                if len(active_scores)
+                else np.inf
+            )
+            for unit_idx in active_indices:
                 key = (record.group, region, str(unit_ids[region_idx, unit_idx]))
                 slot = observations[key]
                 score = float(gates[region_idx, unit_idx])
@@ -69,7 +79,15 @@ def rank_neurons(
 
     rows: list[dict] = []
     for (group, region, unit_id), values in observations.items():
-        stability = float(np.mean(values["top"]))
+        labels = np.asarray(values["label"])
+        top_membership = np.asarray(values["top"])
+        class_stabilities = {
+            int(label): float(top_membership[labels == label].mean())
+            for label in np.unique(labels)
+        }
+        preferred_class, stability = max(
+            class_stabilities.items(), key=lambda item: item[1]
+        )
         modulation = _eta_squared(values["rate"], values["label"])
         mean_gate = float(np.mean(values["gate"]))
         reasons = []
@@ -79,6 +97,9 @@ def rank_neurons(
             reasons.append("class-modulated delay firing")
         if np.mean(values["rate"]) >= 1.0:
             reasons.append("reliable delay activity")
+        is_stable = stability >= float(config["selection"]["stability_threshold"])
+        has_activity = np.mean(values["rate"]) >= 1.0
+        has_support = len(values["gate"]) >= 3
         rows.append(
             {
                 "group": group,
@@ -87,10 +108,11 @@ def rank_neurons(
                 "n_trials": len(values["gate"]),
                 "mean_gate": mean_gate,
                 "selection_stability": stability,
+                "preferred_class": ["Ignore", "Left", "Right"][preferred_class],
                 "class_eta_squared": modulation,
                 "mean_delay_spikes": float(np.mean(values["rate"])),
                 "preferred_context_bin": int(np.median(values["peak_bin"])),
-                "selected": bool(reasons and stability >= float(config["selection"]["stability_threshold"])),
+                "selected": bool(is_stable and has_activity and has_support),
                 "reasons": "; ".join(reasons) if reasons else "not selected",
             }
         )

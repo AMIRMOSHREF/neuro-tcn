@@ -16,13 +16,19 @@ REGION_COLORS = {
 }
 
 
-def _read_selection(path: str | Path | None) -> dict[tuple[str, str], dict]:
+def _read_selection(
+    path: str | Path | None, session: str
+) -> dict[tuple[str, str], dict]:
     if not path:
         return {}
     selected = {}
     with Path(path).open(newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
-            if row.get("selected", "").lower() == "true":
+            row_group = row.get("group", "")
+            if (
+                row.get("selected", "").lower() == "true"
+                and (not row_group or row_group.endswith(f":{session}"))
+            ):
                 selected[(row["region"], str(row["unit_id"]))] = row
     return selected
 
@@ -35,7 +41,11 @@ def make_selection_figure(
 ) -> Path:
     """Create a publication-ready all-units versus selected-units raster figure."""
     npz_path = Path(npz_path)
-    selected_rows = _read_selection(selection_csv)
+    session = next(
+        (parent.name for parent in npz_path.parents if "_ses-" in parent.name or parent.name.lower().startswith("session")),
+        npz_path.parent.parent.name,
+    )
+    selected_rows = _read_selection(selection_csv, session)
     with np.load(npz_path, allow_pickle=True) as npz:
         regions_raw = np.asarray(npz["brain_region"])
         spikes = np.asarray(npz["spike_times"], dtype=object)
@@ -133,8 +143,8 @@ def make_selection_figure(
     )
     criteria = (
         "Selection criteria\n"
-        "• learned sparse gate ranks a neuron within the top fraction of its trial\n"
-        "• rank is stable across held-out-session training trials (default ≥70%)\n"
+        "• learned sparse gate ranks a neuron within the top fraction of its region\n"
+        "• rank is stable within its preferred class across training trials (default ≥70%)\n"
         "• neuron has measurable delay activity; class modulation (η²) is reported\n"
         "• unit identities are never pooled across recording sessions"
     )

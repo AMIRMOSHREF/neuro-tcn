@@ -10,7 +10,8 @@ striatum to:
 The proposed SCOPE-DCC model combines dilated causal convolutions, per-neuron
 temporal attention, a log-STFT branch, sparse neuron gates, and cross-region
 attention. See [METHODOLOGY.md](METHODOLOGY.md) for the claim, controls, and
-statistical requirements.
+statistical requirements. A clearly labelled synthetic layout example is in
+[`docs/example_synthetic_neuron_selection.png`](docs/example_synthetic_neuron_selection.png).
 
 ## Install
 

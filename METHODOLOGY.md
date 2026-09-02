@@ -53,9 +53,9 @@ compact candidate ensemble; it does not establish causal necessity.
 
 Selection is computed using training-fold predictions only:
 
-- a neuron is in the top configured gate fraction within a trial;
-- its top-fraction membership is stable in at least 70% of trials in which it
-  was observed;
+- a neuron is in the top configured gate fraction within its region and trial;
+- its top-fraction membership is stable in at least 70% of trials for its
+  preferred class (Ignore, Left, or Right);
 - it has measurable delay firing;
 - class modulation (one-way eta-squared) and preferred context bin are reported.
 

@@ -56,6 +56,13 @@ def _read_metadata(paths: list[Path]) -> dict[tuple[str, int], str]:
                     continue
                 if row.get("early_lick", "").strip().lower() == "early":
                     continue
+                if row.get("auto_water", "0").strip().lower() not in {"", "0", "false", "n/a"}:
+                    continue
+                if row.get("free_water", "0").strip().lower() not in {"", "0", "false", "n/a"}:
+                    continue
+                photostim = row.get("photostim_onset", "").strip().lower()
+                if photostim not in {"", "n/a", "nan"}:
+                    continue
                 outcome = row.get("outcome", "").strip().lower()
                 if outcome == "miss":
                     continue
