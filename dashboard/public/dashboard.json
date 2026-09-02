@@ -14,7 +14,20 @@
       "Data2": 16
     }
   },
-  "metrics": {},
+  "metrics": {
+    "n_train": 77,
+    "n_val": 19,
+    "best_val_acc": 1.0,
+    "last": {
+      "epoch": 6,
+      "train_loss": 0.1806981364240894,
+      "train_pred": 0.11443255986873206,
+      "train_cls": 0.005608279699483862,
+      "val_acc": 1.0,
+      "val_pred": 0.11153508840422881,
+      "n_eval": 19
+    }
+  },
   "laterality": {
     "left_ALM_right_pref": 1.0,
     "right_ALM_left_pref": 1.0,
