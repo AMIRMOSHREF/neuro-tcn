@@ -76,5 +76,42 @@ def test_csv_epochs_fill_missing_npz_timestamps(tmp_path):
     assert rasters.target["ALM_L"].shape[1] == 30
 
 
+def test_data2_split_region_and_singular_epoch_schema(tmp_path):
+    import numpy as np
+    from delaycast.config import load_config as load_delaycast_config
+    from delaycast.data.rasters import load_trial_rasters
+
+    payload = generate_trial("Right", 8, np.random.default_rng(5), 4)
+    regions = np.asarray(payload.pop("brain_region")).astype(str)
+    spikes = np.asarray(payload.pop("spike_times"), dtype=object)
+    payload.pop("unit_ids")
+    for label, key in {
+        "left ALM": "left_ALM_spikes",
+        "right ALM": "right_ALM_spikes",
+        "left Striatum": "left_Striatum_spikes",
+        "right Striatum": "right_Striatum_spikes",
+    }.items():
+        payload[key] = spikes[regions == label]
+    for plural, singular in {
+        "trial_start": "start_time",
+        "trial_stop": "stop_time",
+        "presample_start_times": "presample_start_time",
+        "presample_stop_times": "presample_stop_time",
+        "sample_start_times": "sample_start_time",
+        "sample_stop_times": "sample_stop_time",
+        "delay_start_times": "delay_start_time",
+        "delay_stop_times": "delay_stop_time",
+        "go_start_times": "go_start_time",
+        "go_stop_times": "go_stop_time",
+    }.items():
+        payload[singular] = payload.pop(plural)
+    path = tmp_path / "data2_trial.npz"
+    np.savez_compressed(path, **payload)
+
+    rasters = load_trial_rasters(path, load_delaycast_config(None))
+    assert all(rasters.context[region].shape == (8, 120) for region in ("ALM_L", "ALM_R", "STR_L", "STR_R"))
+    assert all(rasters.target[region].shape == (8, 30) for region in ("ALM_L", "ALM_R", "STR_L", "STR_R"))
+
+
 def test_class_names():
     assert CLASSES == ("Ignore", "Left", "Right")

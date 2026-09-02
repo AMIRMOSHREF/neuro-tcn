@@ -91,7 +91,22 @@ def read_epochs(data, metadata: dict | None = None) -> dict[str, float]:
         "delay_start_times", "delay_stop_times",
         "go_start_times", "go_stop_times",
     ]
-    ep = {k: _scalar(data, k) for k in keys}
+    aliases = {
+        "trial_start": "start_time",
+        "trial_stop": "stop_time",
+        "presample_start_times": "presample_start_time",
+        "presample_stop_times": "presample_stop_time",
+        "sample_start_times": "sample_start_time",
+        "sample_stop_times": "sample_stop_time",
+        "delay_start_times": "delay_start_time",
+        "delay_stop_times": "delay_stop_time",
+        "go_start_times": "go_start_time",
+        "go_stop_times": "go_stop_time",
+    }
+    ep = {
+        key: _scalar(data, key, _scalar(data, aliases[key]))
+        for key in keys
+    }
     # Some Data2 extractions retained spikes and unit metadata but wrote missing
     # epoch scalars into the NPZ. The audited behavioral row is authoritative
     # for those trials, so use it only where the NPZ value is absent/non-finite.
@@ -110,6 +125,44 @@ def bin_spikes(spike_times: np.ndarray, edges: np.ndarray) -> np.ndarray:
         return np.zeros(len(edges) - 1, dtype=np.float32)
     counts, _ = np.histogram(st, bins=edges)
     return counts.astype(np.float32)
+
+
+def _spikes_by_region(data) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """Read either the combined Data schema or Data2's four pre-split arrays."""
+    if "brain_region" in data.files and "spike_times" in data.files:
+        regions_raw = np.asarray(data["brain_region"]).astype(str)
+        spike_times = np.asarray(data["spike_times"], dtype=object)
+        unit_ids = (
+            np.asarray(data["unit_ids"])
+            if "unit_ids" in data.files
+            else np.arange(len(regions_raw))
+        )
+        canon = np.array([normalize_region(region) or "unknown" for region in regions_raw])
+        return {
+            region: (spike_times[canon == region], unit_ids[canon == region])
+            for region in REGIONS
+        }
+
+    split_keys = {
+        "ALM_L": "left_ALM_spikes",
+        "ALM_R": "right_ALM_spikes",
+        "STR_L": "left_Striatum_spikes",
+        "STR_R": "right_Striatum_spikes",
+    }
+    missing = [key for key in split_keys.values() if key not in data.files]
+    if missing:
+        raise KeyError(
+            "NPZ has neither combined brain_region/spike_times nor all split "
+            f"region arrays; missing {missing}"
+        )
+    result = {}
+    for region, key in split_keys.items():
+        values = np.asarray(data[key], dtype=object).ravel()
+        # Data2 has no explicit unit IDs. Array position is stable within one
+        # session, so preserve that positional identity but never compare it
+        # across sessions.
+        result[region] = (values, np.arange(len(values), dtype=np.int64))
+    return result
 
 
 def load_trial_rasters(npz_path, cfg, metadata: dict | None = None) -> TrialRasters:
@@ -136,26 +189,27 @@ def load_trial_rasters(npz_path, cfg, metadata: dict | None = None) -> TrialRast
     n_tgt = int(round((tgt_stop - go_start) / tbin_s))
     tgt_edges = go_start + np.arange(n_tgt + 1) * tbin_s
 
-    regions_raw = np.asarray(data["brain_region"]).astype(str)
-    spike_times = data["spike_times"]
-    unit_ids = np.asarray(data["unit_ids"]) if "unit_ids" in data.files else np.arange(len(regions_raw))
-    canon = np.array([normalize_region(r) or "unknown" for r in regions_raw])
-
+    n_unknown_region = (
+        sum(normalize_region(region) is None for region in np.asarray(data["brain_region"]).astype(str))
+        if "brain_region" in data.files
+        else 0
+    )
+    region_data = _spikes_by_region(data)
     context, target, uids = {}, {}, {}
     for r in REGIONS:
-        idx = np.where(canon == r)[0]
-        cx = np.zeros((len(idx), n_ctx), dtype=np.float32)
-        tg = np.zeros((len(idx), n_tgt), dtype=np.float32)
-        for row, ui in enumerate(idx):
-            st = np.asarray(spike_times[ui], dtype=float).ravel()
+        spike_times, region_ids = region_data[r]
+        cx = np.zeros((len(spike_times), n_ctx), dtype=np.float32)
+        tg = np.zeros((len(spike_times), n_tgt), dtype=np.float32)
+        for row, values in enumerate(spike_times):
+            st = np.asarray(values, dtype=float).ravel()
             cx[row] = bin_spikes(st, ctx_edges)
             tg[row] = bin_spikes(st, tgt_edges)
-        context[r], target[r], uids[r] = cx, tg, unit_ids[idx]
+        context[r], target[r], uids[r] = cx, tg, region_ids
 
     lick_left = _times(data, "left_lick_times")
     lick_right = _times(data, "right_lick_times")
     qc = {
-        "n_unknown_region": int((canon == "unknown").sum()),
+        "n_unknown_region": int(n_unknown_region),
         "early_lick": bool(np.any(np.concatenate([lick_left, lick_right]) < go_start)) if (lick_left.size + lick_right.size) else False,
         "licked_left": bool(np.any(lick_left >= go_start)),
         "licked_right": bool(np.any(lick_right >= go_start)),
