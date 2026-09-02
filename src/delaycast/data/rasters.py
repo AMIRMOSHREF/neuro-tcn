@@ -73,7 +73,17 @@ class TrialRasters:
         return {r: self.context[r].shape[0] for r in REGIONS}
 
 
-def read_epochs(data) -> dict[str, float]:
+def _metadata_scalar(metadata: dict | None, key: str) -> float:
+    if not metadata:
+        return float("nan")
+    try:
+        value = float(metadata.get(key, np.nan))
+    except (TypeError, ValueError):
+        return float("nan")
+    return value if np.isfinite(value) else float("nan")
+
+
+def read_epochs(data, metadata: dict | None = None) -> dict[str, float]:
     keys = [
         "trial_start", "trial_stop",
         "presample_start_times", "presample_stop_times",
@@ -82,6 +92,12 @@ def read_epochs(data) -> dict[str, float]:
         "go_start_times", "go_stop_times",
     ]
     ep = {k: _scalar(data, k) for k in keys}
+    # Some Data2 extractions retained spikes and unit metadata but wrote missing
+    # epoch scalars into the NPZ. The audited behavioral row is authoritative
+    # for those trials, so use it only where the NPZ value is absent/non-finite.
+    for key in keys:
+        if not np.isfinite(ep[key]):
+            ep[key] = _metadata_scalar(metadata, key)
     # ``go_start`` is the moment the response window opens; fall back to delay_stop if missing.
     if np.isnan(ep["go_start_times"]) and not np.isnan(ep["delay_stop_times"]):
         ep["go_start_times"] = ep["delay_stop_times"]
@@ -96,10 +112,10 @@ def bin_spikes(spike_times: np.ndarray, edges: np.ndarray) -> np.ndarray:
     return counts.astype(np.float32)
 
 
-def load_trial_rasters(npz_path, cfg) -> TrialRasters:
+def load_trial_rasters(npz_path, cfg, metadata: dict | None = None) -> TrialRasters:
     """Bin spikes into the context (delay) and target (response) windows defined by the config."""
     data = np.load(npz_path, allow_pickle=True)
-    ep = read_epochs(data)
+    ep = read_epochs(data, metadata)
     bin_s = cfg.data.bin_ms / 1000.0
     tbin_s = cfg.data.target_bin_ms / 1000.0
 

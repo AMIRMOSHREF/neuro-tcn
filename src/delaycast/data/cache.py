@@ -130,7 +130,7 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
         for rec in tqdm(sorted(recs, key=lambda x: x.trial), desc=f"binning {sess}", leave=False):
             keep, reason = _csv_flags(rec, cfg)
             try:
-                tr = load_trial_rasters(rec.npz_path, cfg)
+                tr = load_trial_rasters(rec.npz_path, cfg, metadata=rec.csv)
             except Exception as e:  # corrupted / incomplete NPZ
                 qc_rows.append({"session": sess, "trial": rec.trial, "label": rec.label, "kept": False, "reason": f"load_error:{e}"})
                 continue

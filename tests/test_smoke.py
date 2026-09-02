@@ -11,7 +11,10 @@ def test_synthetic_npz_schema():
     rng = np.random.default_rng(0)
     payload = generate_trial("Right", 8, rng, 1)
     assert set(REGIONS).issuperset(set(payload["brain_region"]))
-    assert payload["delay_stop_times"] - payload["delay_start_times"] == 1.2
+    assert np.isclose(
+        payload["delay_stop_times"] - payload["delay_start_times"],
+        1.2,
+    )
     assert len(payload["right_lick_times"]) > 0
 
 
@@ -35,6 +38,42 @@ def test_split_regions_and_forward(tmp_path):
     assert out["logits"].shape == (2, 3)
     assert out["y_lick"].shape[0] == 2
     assert out["neuron_attn"].shape == (2, 4, 8)
+
+
+def test_csv_epochs_fill_missing_npz_timestamps(tmp_path):
+    import numpy as np
+
+    rng = np.random.default_rng(3)
+    payload = generate_trial("Left", 8, rng, 3)
+    metadata = {
+        key: float(np.asarray(payload[key]))
+        for key in (
+            "trial_start",
+            "trial_stop",
+            "presample_start_times",
+            "presample_stop_times",
+            "sample_start_times",
+            "sample_stop_times",
+            "delay_start_times",
+            "delay_stop_times",
+            "go_start_times",
+            "go_stop_times",
+        )
+    }
+    payload["delay_start_times"] = np.asarray(np.nan)
+    payload["go_start_times"] = np.asarray(np.nan)
+    path = tmp_path / "missing_epochs.npz"
+    np.savez_compressed(path, **payload)
+
+    from delaycast.config import load_config as load_delaycast_config
+    trial = load_trial_npz(path)
+    from delaycast.data.rasters import load_trial_rasters
+
+    cfg = load_delaycast_config(None)
+    rasters = load_trial_rasters(path, cfg, metadata=metadata)
+    assert np.isfinite(trial["spike_times"][0]).all()
+    assert rasters.context["ALM_L"].shape[1] == 120
+    assert rasters.target["ALM_L"].shape[1] == 30
 
 
 def test_class_names():
