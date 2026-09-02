@@ -1,0 +1,54 @@
+paths:
+  data_root: C:\PythonProject\Rodent\Data
+  data2_root: C:\PythonProject\Rodent\Data2
+  demo_root: data/demo
+  metadata_dir: data/metadata
+  output_dir: outputs
+  figure_dir: figures
+  checkpoint_dir: outputs/checkpoints
+
+epochs:
+  bin_size: 0.01
+  delay_bins: 120
+  lick_bins: 80
+  lick_window_s: 0.80
+  ignore_align: go
+
+model:
+  units_per_region: 32
+  d_model: 64
+  n_dcc_layers: 4
+  kernel_size: 3
+  dropout: 0.15
+  n_freq: 16
+  n_heads: 4
+  sparsity_l1: 0.02
+
+train:
+  batch_size: 8
+  epochs: 10
+  lr: 0.0015
+  weight_decay: 0.0001
+  lambda_pred: 1.0
+  lambda_cls: 0.7
+  lambda_sparse: 0.05
+  seed: 7
+  device: cpu
+  val_fraction: 0.2
+
+selection:
+  top_fraction: 0.18
+  min_rate_hz: 0.4
+  weights:
+    attention: 0.28
+    prediction_gain: 0.22
+    dprime: 0.22
+    delay_lick_coupling: 0.16
+    tf_selectivity: 0.12
+
+prefer_demo_if_missing: true
+exclude_photostim: true
+exclude_early_lick: true
+exclude_auto_water: true
+exclude_both_licks: true
+keep_miss_as_ignore: false
