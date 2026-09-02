@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# generated artefacts
+outputs/
+cache/
+synthetic_data/
+uploads/
+assets/
+terminals/
+*.pt
+*.pth

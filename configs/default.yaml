@@ -1,0 +1,86 @@
+# DelayCAST default configuration.
+# Every value can be overridden on the command line, e.g.
+#   delaycast train --config configs/default.yaml --set train.epochs=40 --set data.data_a_root=D:/Rodent/Data
+
+data:
+  # Dataset A: <root>/Session*/Rasters/{Ignore,Left,Right}/trial_*.npz (+ Videos/...)
+  data_a_root: "C:/PythonProject/Rodent/Data"
+  # Dataset B: <root>/sub-*/sub-*_ses-*/NPZ/{Ignore,Left,Right}/trial*.npz (+ behavioral_master_log_audited.csv)
+  data_b_root: "C:/PythonProject/Rodent/Data2"
+  use_dataset_a: true
+  use_dataset_b: true
+  cache_dir: "cache"
+  bin_ms: 10                 # raster bin width used for the model input (delay/context)
+  target_bin_ms: 50          # bin width for the response-epoch forecasting target
+  context:
+    include_sample: false    # if true the context window starts at sample onset instead of delay onset
+    pre_delay_ms: 0          # extra context before delay onset (only used when include_sample is false)
+    delay_ms: 1200           # nominal delay length (all trials in the audited log have exactly 1.2 s)
+  target:
+    response_ms: 1500        # response (go / lick) epoch length after go cue
+  smoothing_sigma_ms: 20     # Gaussian kernel used to turn spike counts into rates for spectral features
+  qc:
+    drop_early_lick: true          # licks before go cue -> drop trial (both datasets, from NPZ lick times)
+    drop_label_mismatch: true      # folder label disagrees with lick times in NPZ / CSV -> drop trial
+    require_csv_row: false         # Dataset B: drop trial if no matching audited CSV row
+    csv_exclude_photostim: true
+    csv_exclude_auto_water: true
+    min_trials_per_class: 3        # sessions with fewer trials in a class are still used but flagged
+
+selection:
+  min_rate_hz: 1.0            # activity floor on delay-epoch mean rate
+  min_active_trial_frac: 0.2  # unit must spike in at least this fraction of trials (delay epoch)
+  fdr_q: 0.05                 # Benjamini-Hochberg threshold for every statistical criterion
+  late_delay_ms: 400          # window (end of delay) used for the delay->response coupling criterion
+  wavelet: "cmor1.5-1.0"      # complex Morlet for CWT
+  bands_hz:                   # bands used for the spectro-temporal criterion and the STFT branch
+    slow: [1, 4]
+    theta: [4, 12]
+    beta: [12, 30]
+  weights:                    # weights of the -log10(q) terms in the combined score
+    selectivity: 1.0
+    coupling: 1.0
+    spectral: 0.75
+    ramp: 0.5
+  min_criteria: 2             # unit must satisfy at least this many criteria to be eligible
+  top_k_per_region: 32        # K selected neurons per region per session (padded with zeros if fewer)
+
+model:
+  d_model: 64
+  tcn_blocks: 5               # dilations 1,2,4,...,2^(blocks-1); kernel 3 -> receptive field 125 bins @10 ms (~ whole delay)
+  kernel_size: 3
+  dropout: 0.15
+  n_heads: 4
+  use_spectral_branch: true   # STFT band-power channels are appended to the read-in
+  neuron_gate_l1: 0.01        # sparsity pressure on the learned neuron gates
+  forecast_weight: 1.0        # weight of the Poisson forecasting loss
+  persistence_late_bins: 20   # late-delay window (bins) whose mean rate seeds each neuron's own forecast
+  class_weight: 1.0
+
+train:
+  seed: 0
+  epochs: 30
+  batch_size: 32
+  lr: 0.002
+  weight_decay: 0.0001
+  patience: 8
+  select_by: "val_loss"         # checkpoint selection: val_loss (multi-task) | val_bacc (classification only)
+  eval_mode: "within_session"   # within_session | cross_session
+  val_frac: 0.15
+  test_frac: 0.15
+  adapt_frac: 0.2               # cross_session: fraction of held-out trials used to fit the read-in
+  adapt_epochs: 15
+  context_aug_prob: 0.5         # probability that a training batch sees only the last `keep` ms of the delay
+  context_aug_min_ms: 100       # shortest context kept by the augmentation
+  num_workers: 0
+  device: "auto"
+
+evaluate:
+  context_sweep_ms: [100, 200, 300, 400, 600, 800, 1000, 1200]
+  n_shuffles: 20
+
+figures:
+  dpi: 220
+  raster_trial: null           # path to a specific NPZ to plot; default = first Left trial of first session
+
+output_dir: "outputs"
