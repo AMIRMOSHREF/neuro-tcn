@@ -1,135 +1,132 @@
-# Rodent delay → lick: two pipelines in one repository
+# DelayCAST v2 — which delay-epoch neurons, and which past context, predict the upcoming lick
 
-This repository contains two independent implementations of the same study (predict response-epoch
-activity and the Ignore / Left / Right action from delay-epoch activity of left/right ALM and
-left/right striatum, using `Data` and `Data2`):
+Head-fixed mice, auditory delayed-response task, simultaneous spiking in **left / right ALM** and **left / right
+striatum** (`Data`: 4 sessions of `Session*/Rasters/{Ignore,Left,Right}/trial_*.npz`; `Data2`: 3 animals × several
+`sub-*_ses-*/NPZ/{Ignore,Left,Right}/*.npz` sessions with audited behavioural logs). Using **only the 1.2 s delay**
+(the past context, ending at the go cue) of the four populations, DelayCAST
 
-| pipeline | code | config | docs | entry point |
-|---|---|---|---|---|
-| **DelayCAST** (criterion-based neuron selection → dilated causal TCN + neuron / temporal / cross-region attention + STFT branch, joint forecasting + classification) | `src/delaycast/` | `configs/delaycast.yaml` | [`paper/DELAYCAST_METHODOLOGY.md`](paper/DELAYCAST_METHODOLOGY.md) | `python -m delaycast …` |
-| **SPEC-TCNN** | `src/rodent_tcnn/` | `configs/default.yaml` | [`paper/METHODOLOGY.md`](paper/METHODOLOGY.md) | `python scripts/run_pipeline.py` |
+1. **selects** the neurons that carry information about the upcoming action with model-free, stability-checked
+   single-unit criteria (choice selectivity, delay→response coupling, rate-normalised wavelet selectivity, ramping;
+   information onset as a descriptor) — computed on training trials only, with a written reason for every unit;
+2. **forecasts** the response-epoch activity of those neurons and **classifies** Ignore / Left / Right with a strictly
+   causal network (dilated causal TCN → causal Transformer blocks → attention pooling → cross-region attention, with a
+   causal Gabor filterbank of the gated population rate as the spectro-temporal branch);
+3. **measures which past context is used** (context sweep → context-sufficiency index τ<sub>95</sub>, permutation
+   occlusion maps over time, regions and neurons) and **tests a falsifiable claim** (`REPORT.md`, per-session paired
+   statistics, negative control).
+
+Methods: [`paper/DELAYCAST_METHODOLOGY.md`](paper/DELAYCAST_METHODOLOGY.md) · Claim and predictions:
+[`paper/CLAIMS.md`](paper/CLAIMS.md) · NPZ schema: [`paper/NPZ_SCHEMA.md`](paper/NPZ_SCHEMA.md)
+
+The legacy SPEC-TCNN pipeline (`src/rodent_tcnn/`, `scripts/run_pipeline.py`) is kept for reference but is no longer
+the recommended entry point.
 
 ---
 
-## DelayCAST — quick start
+## Install
 
 ```bash
-pip install -r requirements.txt          # CPU torch: pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install -e .                         # makes `python -m delaycast` / `delaycast` available
+pip install -r requirements.txt      # CPU-only torch: pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -e .                     # provides `python -m delaycast` and the `delaycast` console script
+pytest -q tests                      # ~1 min: schema, causality, selection, leakage sentinel on synthetic data
+```
 
-# 1. point the config at your disks (defaults are C:/PythonProject/Rodent/Data and .../Data2)
-python -m delaycast inspect --npz-detail --set data.data_a_root=C:/PythonProject/Rodent/Data --set data.data_b_root=C:/PythonProject/Rodent/Data2
+## Commands (real data)
 
-# 2. bin all trials (QC + per-session cache), run the neuron-selection criteria (tables with reasons)
+Point the config at your disks once (defaults are `C:/PythonProject/Rodent/Data` and `.../Data2`), or pass
+`--set data.data_a_root=... --set data.data_b_root=...` to every command.
+
+```bash
+# 0. what is on disk (both layouts, both NPZ schemas, CSV joins)
+python -m delaycast inspect --npz-detail
+
+# 1. bin every trial once (uint8 per-session tensors, QC log with reasons)          ~ 1 min / session
 python -m delaycast cache
+
+# 2. descriptive neuron selection on all trials: tables with reasons, funnel,        ~ 2-4 min / session
+#    stability null; outputs/delaycast/selection/*.csv
 python -m delaycast select
 
-# 3. train + evaluate; `--modes` gives the neuron-set ablation (criteria-selected vs top-K by rate vs random K)
-python -m delaycast train --modes criteria,rate,random
+# 3. train + evaluate.  Neuron sets: criteria | rate | random; model controls: popmean | nospec;
+#    seeds from configs (0,1,2); every run re-selects neurons on ITS training split.  ~ 30-60 min / run (4-core CPU)
+python -m delaycast train --modes criteria,rate,random --variants popmean --seeds 0,1,2
 
-# 4. figures (Fig1 raster+selection, Fig2 time-frequency, Fig3 attention, Fig4 results)
+# 4. transfer: train on one dataset, adapt session read-in/read-out on 30 % of the other's trials
+#    (held-out units chosen label-free), test on the rest
+python -m delaycast train --modes criteria,random --seeds 0 --set train.eval_mode=cross_dataset
+#    leave-one-session-out (opt-in, one holdout at a time)
+python -m delaycast train --modes criteria --seeds 0 --set train.eval_mode=cross_session --holdout A/Session1,B/sub-440957_ses-20190211T143614
+
+# 5. negative control: labels permuted within session BEFORE selection/training -> must be at chance
+python -m delaycast train --modes criteria --seeds 0 --negative-control
+
+# 6. figures (Fig 1 raster + selection for every session, Fig 2 time-frequency, Fig 3 attention/occlusion, Fig 4 results)
 python -m delaycast figures --all-sessions
+#    Figure 1 for one specific trial file (works for QC-dropped trials too)
+python -m delaycast figure1 --npz C:/PythonProject/Rodent/Data/Session1/Rasters/Left/trial_331.npz
 
-# or everything at once
+# 7. the verdict on every prediction of the claim -> outputs/delaycast/REPORT.md
+python -m delaycast report
+
+# everything above in one go (3 seeds, popmean control, cross-dataset, negative control, figures, report)
 python -m delaycast all
+python -m delaycast all --quick          # one seed, within-session only (≈ 10 min on the synthetic tree, 1-2 h on real data)
+```
 
-# leave-one-session-out with adapter-only fitting on 20 % of the held-out session
-python -m delaycast train --set train.eval_mode=cross_session
+Any config value can be overridden with `--set key.path=value` (`configs/delaycast.yaml` documents every key).
+GPU is used automatically (`train.device: auto`).
 
-# no real data on this machine? build a layout-identical synthetic tree and run on it
+## No real data on this machine?
+
+```bash
 python -m delaycast synth --out synthetic_data
-python -m delaycast all --set data.data_a_root=synthetic_data/Data --set data.data_b_root=synthetic_data/Data2 \
+python -m delaycast all --quick --set data.data_a_root=synthetic_data/Data --set data.data_b_root=synthetic_data/Data2 \
        --set data.cache_dir=cache_synth --set output_dir=outputs_synth --set selection.top_k_per_region=16 --set model.d_model=32
 ```
 
-Any config value can be overridden with `--set key.path=value`. Outputs go to `outputs/delaycast/`:
-`selection/*.csv` (per-unit criteria + reasons), `run_<mode>/results.json`, `history.csv`,
-`test_predictions.csv`, `attention.npz`, `model.pt`, and `figures/*.png`. Example figures produced
-from the synthetic data are in `figures/delaycast_synthetic_example/`. GPU is used automatically when
-available (`train.device: auto`).
+The synthetic tree mirrors both layouts and NPZ schemas; example figures made from it are in
+`figures/delaycast_synthetic_example/` (they demonstrate the pipeline, not a result).
 
----
+## Outputs (`outputs/delaycast/`)
 
-# SPEC-TCNN — delay-period neuron selection for lick-time prediction
+| path | content |
+|---|---|
+| `selection/<session>.csv` | one row per unit: rates per class, AUROC L/R, coupling ρ, wavelet band, ramp slope, onset / peak / late-window AUROC, q-values, criteria flags, stability, rank, `reasons`, `reason_short` |
+| `selection/summary.csv`, `selection/funnel.csv` | per-session / per-region funnel (recorded → floor → eligible → stable → selected), φ between criteria, false-selection bound, stability null |
+| `runs/within/<mode>[_<variant>]/seed<k>/` | `results.json` (classification + CIs + chance, forecast, context sweep + τ<sub>95</sub>, temporal occlusion, region ablation, baselines, importance agreement), `neuron_importance.csv`, `attention.npz`, `test_predictions.csv`, `selection_<session>.csv` (train-split selection actually used), `model.pt` |
+| `runs/cross_dataset/…`, `runs/cross_session/…`, `runs/negative_control/…` | same, plus a pooled `results.json` per seed |
+| `figures/fig1_raster_selection_<session>.png/.pdf` | all recorded units of one trial → selected units with evidence strip, exemplars, reasons, funnel |
+| `figures/fig2_…`, `fig3_attention.png`, `fig4_results.png` | time–frequency, attention + occlusion + importance agreement, results |
+| `REPORT.md`, `report.json` | verdict per prediction with numbers, CIs, n sessions |
 
-Use the **delay** epoch in four populations (left ALM, right ALM, left striatum, right striatum) to (1) reconstruct those same signals in the **lick** epoch and (2) classify **Ignore / Left / Right**. The model is a temporal CNN with **dilated causal convolution**, **neuron + temporal attention**, and a **wavelet / STFT** branch.
+## The figure (what the gold-coloured rows mean)
 
-Both corpora are first-class:
+Figure 1 shows every recorded unit of the four regions on one real trial (rows sorted by selection status with a
+status strip), the K selected units of that trial rank-ordered next to their evidence (AUROC Left/Right, −log10 q of
+S/C/W/R, information onset, stability, learned gate and permutation importance), the rank-1 unit of every region
+(class-conditional PSTH delay → response, coupling window, onset marker, per-trial coupling scatter), the criteria
+legend with a fixed-field reason line per unit, and the selection funnel per region. A unit is selected because it
+passes the activity floor, satisfies at least two of {S, C, W, R} at BH-FDR q < 0.05 on the training trials, and is
+re-selected in ≥ 60 % of 50 stratified half-subsamples of those trials; the `reasons` column of the selection table
+spells this out with the numbers for every unit, selected or not.
 
-| Corpus | Layout | Labels |
-|---|---|---|
-| **Data** | `Session*/Rasters/{Ignore,Left,Right}/trial_*.npz` | folder name |
-| **Data2** | `sub-*/sub-*_ses-*/NPZ/{Ignore,Left,Right}/*.npz` | audited CSV, with photostim / early-lick / bilateral-lick dropped |
+## Scientific claim (one paragraph)
 
-NPZ keys match the attached extraction README (`unit_ids`, `brain_region`, `spike_times`, delay/go timestamps, lick times).
+During the delay, a criterion-selected, stability-checked subset of ≤ 32 units per region supports decoding of the
+upcoming lick direction at least as well as a tuned linear decoder on all ≈ 2000 recorded units and better than
+rate-matched or random subsets; the last ≈ 500 ms before the go cue are sufficient and the last 400 ms are the most
+costly to remove; the selected units' late-delay activity forecasts their own response-epoch activity beyond
+persistence; ALM input matters more than striatal input for lick direction (striatal involvement in no-lick trials is
+exploratory); model-based neuron importance agrees with the model-free criteria; the causal spectro-temporal branch
+adds accuracy over a matched population-rate control; and the backbone transfers across datasets after adapter-only
+fitting with label-free unit selection. Each clause is a row in [`paper/CLAIMS.md`](paper/CLAIMS.md) with its
+comparator and failure condition; `REPORT.md` prints the verdicts.
 
-## Scientific claim (one sentence)
+## Runtime budget (CPU workstation, ≈ 2000 units × 350 trials × 15 sessions)
 
-A sparse cortico-striatal ensemble already present in the last few hundred milliseconds of delay is sufficient to forecast lick-period population activity and the upcoming action; SPEC-TCNN names those neurons and the past context they use.
-
-Full claims and tests: [`paper/CLAIMS.md`](paper/CLAIMS.md). Methods: [`paper/METHODOLOGY.md`](paper/METHODOLOGY.md).
-
-## Commands
-
-```bash
-pip install -r requirements.txt
-
-# Point at your disks
-#   configs/default.yaml → data_root, data2_root
-# Windows defaults:
-#   C:\PythonProject\Rodent\Data
-#   C:\PythonProject\Rodent\Data2
-
-# If those folders are missing, build a schema-identical demo
-python scripts/prepare_demo.py
-
-# Discover both datasets, train SPEC-TCNN, select neurons, write Figure 1
-python scripts/run_pipeline.py --epochs 10
-
-# Train only
-python scripts/train.py --epochs 20
-
-# Heavier: wavelet/STFT inside the train loop
-python scripts/run_pipeline.py --tf --epochs 8
-```
-
-Outputs:
-
-- `figures/fig1_neuron_selection.png` — all units, then selected units, with reasons
-- `figures/fig0_spec_tcnn_schematic.png`
-- `outputs/trial_catalog.csv`
-- `outputs/selection_figure_trial.csv`
-- `outputs/laterality.json`
-- `outputs/checkpoints/spec_tcnn.pt`
-
-## Paper companion
-
-```bash
-cd dashboard
-npm install
-npm run dev -- --port 43173
-```
-
-The dashboard shows Figure 1, per-neuron reasons, the six claims, and the run book.
-
-## Neuron selection (what the gold ticks mean)
-
-Inside each region, every unit is z-scored on five criteria and the top 18% are kept:
-
-1. **SPEC-TCNN neuron attention** — the model actually used this unit as past context
-2. **Prediction gain** — occluding it raises lick-raster error
-3. **Delay-rate d′** — Left vs Right (and vs Ignore)
-4. **Delay→lick coupling** — does this cell’s delay PSTH predict its own lick PSTH?
-5. **TF selectivity** — class-modulated 12–45 Hz Morlet / STFT energy
-
-Silent units (&lt; 0.4 Hz in delay) are penalized. A loud tonic cell loses to a quieter delay-choice or ramping cell.
-
-## Real data
-
-Copy the audited logs next to Data2 or into `data/metadata/`:
-
-- `combined_audited_master_log.csv`
-- `combined_behavioral_master_log.csv`
-- `audit_summary.csv`
-
-The loader already understands those filenames. No code change is required when you swap the demo tree for `C:\PythonProject\Rodent\...`.
+Measured on a 4-core CPU: one training step (batch 32, K = 32 × 4 regions, 0.57 M parameters) ≈ 0.45 s, i.e. ≈ 1 min
+per epoch over ≈ 4500 training trials; a 60-epoch run is ≈ 30–60 min (early stopping usually halves it), evaluation
+≈ 10 min. cache ≈ 15 min once; select ≈ 45 min once (cached per split afterwards). The full `all` protocol (3 seeds ×
+4 arms + cross-dataset + negative control ≈ 15 runs) is therefore an overnight CPU job or ≈ 1 h on a GPU
+(`train.device: auto`); `all --quick` (one seed, within-session only) is ≈ 1–2 h on CPU. RAM ≈ 1.5 GB for all
+session caches (uint8) + model.

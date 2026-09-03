@@ -21,3 +21,6 @@ synthetic_data/
 outputs_synth/
 outputs/delaycast/
 *.egg-info/
+outputs_synth*/
+cache_synth*/
+synthetic_data*/

@@ -22,8 +22,8 @@ class SessionCache:
     session: str
     dataset: str
     subject: str
-    context: dict[str, np.ndarray]   # region -> (n_trials, n_units, T_ctx)
-    target: dict[str, np.ndarray]    # region -> (n_trials, n_units, T_tgt)
+    context: dict[str, np.ndarray]   # region -> (n_trials, n_units, T_ctx) uint8 spike counts
+    target: dict[str, np.ndarray]    # region -> (n_trials, n_units, T_tgt) uint8 spike counts
     unit_ids: dict[str, np.ndarray]  # region -> (n_units,)
     labels: np.ndarray               # (n_trials,) int class index
     trials: np.ndarray               # (n_trials,) trial numbers
@@ -38,12 +38,19 @@ class SessionCache:
     def class_counts(self) -> dict[str, int]:
         return {c: int((self.labels == i).sum()) for i, c in enumerate(CLASSES)}
 
+    @property
+    def n_units(self) -> dict[str, int]:
+        return {r: int(self.context[r].shape[1]) for r in REGIONS}
+
+    def nbytes(self) -> int:
+        return int(sum(self.context[r].nbytes + self.target[r].nbytes for r in REGIONS))
+
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         arrays = {"labels": self.labels, "trials": self.trials}
         for r in REGIONS:
-            arrays[f"ctx_{r}"] = self.context[r]
-            arrays[f"tgt_{r}"] = self.target[r]
+            arrays[f"ctx_{r}"] = as_counts_u8(self.context[r])
+            arrays[f"tgt_{r}"] = as_counts_u8(self.target[r])
             arrays[f"uid_{r}"] = self.unit_ids[r]
         np.savez_compressed(path, **arrays)
         self.meta.to_csv(path.with_suffix(".meta.csv"), index=False)
@@ -62,12 +69,24 @@ class SessionCache:
         meta = pd.read_csv(path.with_suffix(".meta.csv"))
         return cls(
             session=info["session"], dataset=info["dataset"], subject=info["subject"],
-            context={r: z[f"ctx_{r}"] for r in REGIONS},
-            target={r: z[f"tgt_{r}"] for r in REGIONS},
+            context={r: as_counts_u8(z[f"ctx_{r}"]) for r in REGIONS},
+            target={r: as_counts_u8(z[f"tgt_{r}"]) for r in REGIONS},
             unit_ids={r: z[f"uid_{r}"] for r in REGIONS},
             labels=z["labels"], trials=z["trials"], meta=meta,
             bin_ms=info["bin_ms"], target_bin_ms=info["target_bin_ms"],
         )
+
+
+def as_counts_u8(a: np.ndarray) -> np.ndarray:
+    """Spike counts per bin as uint8 (a 10 ms / 50 ms bin never holds > 255 spikes); 4x less RAM than float32.
+
+    Every consumer does arithmetic that promotes (sum -> uint64, mean / division -> float64), so the dtype is
+    transparent; model tensors are cast to float32 for the selected K units only.
+    """
+    a = np.asarray(a)
+    if a.dtype == np.uint8:
+        return a
+    return np.clip(np.rint(a), 0, 255).astype(np.uint8)
 
 
 def _csv_flags(rec: TrialRecord, cfg) -> tuple[bool, str]:
@@ -169,8 +188,8 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
             continue
         sc = SessionCache(
             session=sess, dataset=recs[0].dataset, subject=recs[0].subject,
-            context={r: np.stack(ctx[r]) if ctx[r] else np.zeros((len(labels), 0, n_ctx), np.float32) for r in REGIONS},
-            target={r: np.stack(tgt[r]) if tgt[r] else np.zeros((len(labels), 0, n_tgt), np.float32) for r in REGIONS},
+            context={r: as_counts_u8(np.stack(ctx[r])) if ctx[r] else np.zeros((len(labels), 0, n_ctx), np.uint8) for r in REGIONS},
+            target={r: as_counts_u8(np.stack(tgt[r])) if tgt[r] else np.zeros((len(labels), 0, n_tgt), np.uint8) for r in REGIONS},
             unit_ids={r: (uids[r] if uids[r] is not None else np.zeros(0)) for r in REGIONS},
             labels=np.asarray(labels), trials=np.asarray(trials), meta=pd.DataFrame(meta),
             bin_ms=cfg.data.bin_ms, target_bin_ms=cfg.data.target_bin_ms,
@@ -212,5 +231,6 @@ def cache_summary(caches: list[SessionCache]) -> pd.DataFrame:
         row.update({f"units_{r}": c.context[r].shape[1] for r in REGIONS})
         row["T_ctx"] = c.context[REGIONS[0]].shape[2]
         row["T_tgt"] = c.target[REGIONS[0]].shape[2]
+        row["MB"] = round(c.nbytes() / 1e6, 1)
         rows.append(row)
     return pd.DataFrame(rows)

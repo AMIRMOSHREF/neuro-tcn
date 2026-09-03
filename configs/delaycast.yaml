@@ -37,12 +37,29 @@ selection:
     slow: [1, 4]
     theta: [4, 12]
     beta: [12, 30]
-  weights:                    # weights of the -log10(q) terms in the combined score
+  window_ms: 200              # temporal-locus (T): sliding-window length ...
+  window_step_ms: 50          # ... and step (200/50 -> 21 windows over a 1.2 s delay)
+  locus_threshold: 0.1        # |AUROC - 0.5| above which a window belongs to a cluster
+  locus_n_perm: 200           # label permutations (shared across units) for the cluster-mass null
+  coupling_n_perm: 500        # circular-shift permutations for the coupling (C) null on the full fit set ...
+  subsample_n_perm: 100       # ... and inside each stability subsample
+  min_ignore_trials: 8        # the descriptive Ignore-vs-lick test needs at least this many Ignore trials
+  n_freqs_per_band: 5         # CWT scales per band (fewer = faster; the W statistic averages over them)
+  spectral_candidates: screened   # which units get the (expensive) CWT: screened | floor | all
+  weights:                    # weights of the -log10(q) terms in the score (tie-breaker after stability)
     selectivity: 1.0
     coupling: 1.0
     spectral: 0.75
     ramp: 0.5
-  min_criteria: 2             # unit must satisfy at least this many criteria to be eligible
+  min_criteria: 2             # unit must satisfy at least this many of S, C, W, R to be eligible
+  n_subsamples: 50            # stability selection: stratified half-subsamples of the fit trials (0 = off)
+  subsample_frac: 0.5         # fraction of trials per subsample (without replacement)
+  min_stability: 0.6          # selection frequency needed to count as "stable" (> 0.5 for the false-selection bound)
+  fill_unstable: false        # if fewer than K stable units: keep K_eff < K (false) or fill by score (true)
+  n_null_permutations: 2      # `select` only: label-permuted repeats giving the chance level of stability
+  fit_on_train_only: true     # during `train`, criteria are computed on the training(+validation) trials only
+  holdout_mode: label_free    # held-out sessions (cross_session / cross_dataset): label_free | adapt
+  min_criteria_label_free: 1  # label-free eligibility: >= this many of {C, R}
   top_k_per_region: 32        # K selected neurons per region per session (padded with zeros if fewer)
 
 model:
@@ -51,14 +68,19 @@ model:
   kernel_size: 3
   dropout: 0.15
   n_heads: 4
-  use_spectral_branch: true   # STFT band-power channels are appended to the read-in
-  neuron_gate_l1: 0.01        # sparsity pressure per neuron gate (penalty = l1 * sum of gates, mean over regions)
+  n_transformer_layers: 2     # causal Transformer blocks after the TCN (pre-norm MHA + FFN, causal mask)
+  positional_encoding: sinusoidal  # fixed time-to-go encoding added before the Transformer: sinusoidal | learned | none
+  spectral_branch: bands      # in-model causal Gabor filterbank on the gated population: bands | popmean (matched control) | none
+  spectral_win_ms: 300        # window of the causal filterbank (past bins only)
+  neuron_gate_penalty: hoyer  # scale-invariant Hoyer sparsity (hoyer) or plain L1 mass (l1)
+  neuron_gate_weight: 0.5     # weight of the gate sparsity penalty (mean over regions)
   forecast_weight: 1.0        # weight of the Poisson forecasting loss
   persistence_late_bins: 20   # late-delay window (bins) whose mean rate seeds each neuron's own forecast
   class_weight: 1.0
 
 train:
-  seed: 0
+  seed: 0                       # seed of a single run; `train --seeds 0,1,2` repeats every run per seed
+  seeds: [0, 1, 2]              # default seed list used by `train` / `all` (splits differ per seed, shared across modes)
   epochs: 60
   batch_size: 32
   lr: 0.002
@@ -66,19 +88,33 @@ train:
   weight_decay: 0.0001
   patience: 12
   select_by: "val_loss"         # checkpoint selection: val_loss (multi-task) | val_bacc (classification only)
-  eval_mode: "within_session"   # within_session | cross_session
+  eval_mode: "within_session"   # within_session | cross_session | cross_dataset
+  split_scheme: "random"        # random (stratified) | blocked (contiguous test blocks + guard gap; drift-robust)
   val_frac: 0.15
   test_frac: 0.15
-  adapt_frac: 0.2               # cross_session: fraction of held-out trials used to fit the read-in
+  class_weight_cap: 5.0         # inverse-frequency class weights are capped here (Ignore is rare)
+  adapt_frac: 0.3               # cross_*: fraction of held-out trials used to fit the session adapter (+ select units)
+  adapt_val_frac: 0.2           # part of the adapt trials kept for early stopping of the adapter fit
   adapt_epochs: 15
+  adapt_fit_gates: false        # keep the held-out session's gates at their init during adaptation
   context_aug_prob: 0.5         # probability that a training batch sees only the last `keep` ms of the delay
   context_aug_min_ms: 100       # shortest context kept by the augmentation
+  window_dropout_prob: 0.2      # probability that one random window of the delay is masked (in-distribution occlusion)
+  window_dropout_ms: 200
+  region_dropout_prob: 0.2      # probability that one region's input is removed for a batch (in-distribution ablation)
   num_workers: 0
   device: "auto"
 
 evaluate:
-  context_sweep_ms: [100, 200, 300, 400, 600, 800, 1000, 1200]
-  n_shuffles: 20
+  context_sweep_ms: [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200]
+  n_shuffles: 1000              # within-session label permutations for the chance level (predictions fixed)
+  n_bootstrap: 1000             # trial resamples (stratified by session x class) for CIs and the CSI
+  occlusion: permute            # permute (slice replaced by another test trial of the same session) | zero
+  occlusion_window_ms: 200      # window length of the temporal occlusion map
+  occlusion_step_ms: 100
+  csi_fraction: 0.95            # tau95 = shortest context keeping >= 95 % of full-context accuracy (isotonic fit)
+  linear_sweep: true            # model-free tau95 from a tuned linear decoder on all units (last tau ms only)
+  neuron_importance: true       # per-neuron permutation-occlusion importance (one batched forward per region)
 
 figures:
   dpi: 220

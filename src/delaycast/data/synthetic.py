@@ -4,7 +4,8 @@ The generator is only meant for smoke-testing the pipeline end-to-end on a machi
 the real recordings. Spike trains are inhomogeneous Poisson processes with:
   * a random fraction of "informative" units per region that ramp during the delay in a
     choice-dependent way (Left / Right / Ignore),
-  * response-epoch activity that is coupled to each unit's own late-delay rate,
+  * a per-trial excitability gain shared by the late delay and the response epoch of "coupled" units, so
+    that a unit's late-delay rate predicts its own response-epoch rate *within* a class (criterion C),
   * a subset of units with choice-dependent 4-12 Hz modulation (spectro-temporal information).
 Epoch timings follow the audited behavioral logs: presample ~0.5-0.9 s, sample 0.65 s,
 delay 1.2 s, response window 1.5 s.
@@ -27,7 +28,7 @@ def _poisson_times(rate_hz: np.ndarray, t0: float, dt: float, rng: np.random.Gen
     return t0 + (idx + rng.random(len(idx))) * dt
 
 
-def _session_units(rng, unit_counts: dict[str, int], info_frac=0.35, spec_frac=0.2) -> dict[str, dict]:
+def _session_units(rng, unit_counts: dict[str, int], info_frac=0.35, spec_frac=0.2, coupled_frac=0.5) -> dict[str, dict]:
     """Draw the fixed properties of every unit of a session once (identity is stable across trials)."""
     units = {}
     for r in REGIONS:
@@ -36,14 +37,18 @@ def _session_units(rng, unit_counts: dict[str, int], info_frac=0.35, spec_frac=0
             "base": rng.gamma(2.0, 2.5, size=n),            # baseline Hz
             "informative": rng.random(n) < info_frac,
             "spectral": rng.random(n) < spec_frac,
+            "coupled": rng.random(n) < coupled_frac,        # late-delay <-> response trial-gain coupling
             "pref": rng.integers(0, 3, size=n),             # preferred class of informative units
-            "amp": rng.uniform(4, 12, size=n),
+            "amp": rng.uniform(6, 14, size=n),
         }
     return units
 
 
-def _unit_profile(units: dict, cls_idx: int):
-    """Return (n_units, T) rate profiles (context + target) for one region and one class."""
+def _unit_profile(units: dict, cls_idx: int, rng: np.random.Generator | None = None):
+    """Return (n_units, T) rate profiles (context + target) for one region and one class.
+
+    ``rng`` draws the per-trial excitability gain of coupled units (log-normal, sd 0.35) that multiplies the
+    late-delay and response-epoch rates together."""
     dt = 0.005
     t_pre, t_sample, t_delay, t_go = 0.7, SAMPLE_S, DELAY_S, GO_S
     n = int(round((t_pre + t_sample + t_delay + t_go) / dt))
@@ -55,6 +60,8 @@ def _unit_profile(units: dict, cls_idx: int):
     in_delay = (t >= d0) & (t < d1)
     in_go = t >= d1
     ramp = np.clip((t - d0) / t_delay, 0, 1)
+    late_win = (t >= d1 - 0.5) & (t < d1)
+    trial_gain = np.exp(rng.normal(0.0, 0.35, size=n_units)) if rng is not None else np.ones(n_units)
     for u in range(n_units):
         if units["informative"][u]:
             gain = 1.0 if units["pref"][u] == cls_idx else -0.4
@@ -66,6 +73,9 @@ def _unit_profile(units: dict, cls_idx: int):
         if units["spectral"][u]:
             f = 6.0 + 2.0 * cls_idx
             rates[u, in_delay] += 4.0 * (1 + np.sin(2 * np.pi * f * t[in_delay]))
+        if units.get("coupled", np.zeros(n_units, bool))[u]:
+            rates[u, late_win] *= trial_gain[u]
+            rates[u, in_go] *= trial_gain[u]
     return np.clip(rates, 0.2, None), dt, (t_pre, t_sample, t_delay, t_go)
 
 
@@ -75,7 +85,7 @@ def _make_trial(rng, units: dict[str, dict], cls: str, t_start: float):
     uid = 0
     t_pre = t_sample = t_delay = t_go = None
     for r in REGIONS:
-        rates, dt, (t_pre, t_sample, t_delay, t_go) = _unit_profile(units[r], cls_idx)
+        rates, dt, (t_pre, t_sample, t_delay, t_go) = _unit_profile(units[r], cls_idx, rng)
         for u in range(rates.shape[0]):
             spikes.append(_poisson_times(rates[u], t_start, dt, rng))
             regions.append(REGION_LABELS[r])
@@ -131,7 +141,7 @@ def _csv_row(session_dir: str, subject: str, trial: int, payload: dict, cls: str
     }
 
 
-def make_synthetic(root: str | Path, n_sessions_a=2, n_sessions_b=2, trials_per_class=(8, 20, 20),
+def make_synthetic(root: str | Path, n_sessions_a=2, n_sessions_b=2, trials_per_class=(12, 40, 40),
                    units_per_region=(14, 22), seed=0) -> tuple[Path, Path]:
     """Create ``<root>/Data`` and ``<root>/Data2``. Returns their paths."""
     rng = np.random.default_rng(seed)

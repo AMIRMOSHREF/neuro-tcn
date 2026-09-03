@@ -10,7 +10,6 @@ from torch.utils.data import Dataset, Sampler
 
 from .. import CLASSES, REGIONS
 from ..features.selection import SelectionResult
-from ..features.spectral import band_power_stft, smooth_rates
 from .cache import SessionCache
 
 
@@ -19,7 +18,6 @@ class SessionTensors:
     session: str
     dataset: str
     x: dict[str, np.ndarray]        # region -> (n_trials, K, T_ctx) counts of selected neurons (zero-padded)
-    spec: dict[str, np.ndarray]     # region -> (n_trials, n_bands, T_ctx) population STFT band power
     y: dict[str, np.ndarray]        # region -> (n_trials, K, T_tgt) response-epoch counts
     neuron_mask: dict[str, np.ndarray]  # region -> (K,) True for real neurons
     unit_index: dict[str, np.ndarray]   # region -> (K,) original unit index (-1 for padding)
@@ -31,17 +29,21 @@ class SessionTensors:
         return len(self.labels)
 
 
-def choose_indices(sel: SelectionResult, cache: SessionCache, cfg, mode: str, rng: np.random.Generator) -> dict[str, np.ndarray]:
-    """``criteria`` (default), ``rate`` (top-K most active, no selectivity) or ``random`` (K random units)."""
+def choose_indices(sel: SelectionResult | None, cache: SessionCache, cfg, mode: str, rng: np.random.Generator,
+                   trial_idx: np.ndarray | None = None) -> dict[str, np.ndarray]:
+    """``criteria`` (default), ``rate`` (top-K most active on the fit trials, no selectivity) or ``random`` (K random units)."""
     k = int(cfg.selection.top_k_per_region)
     out = {}
+    idx = np.arange(cache.n_trials) if trial_idx is None else np.asarray(trial_idx, dtype=int)
     for r in REGIONS:
         n = cache.context[r].shape[1]
         if mode == "criteria":
-            out[r] = sel.selected[r][:k]
+            if sel is None:
+                raise ValueError("mode='criteria' needs a SelectionResult")
+            out[r] = np.asarray(sel.selected[r][:k], dtype=int)
         elif mode == "rate":
-            rates = cache.context[r].sum(axis=(0, 2))
-            out[r] = np.argsort(-rates)[:k]
+            rates = cache.context[r][idx].sum(axis=(0, 2))
+            out[r] = np.argsort(-rates, kind="mergesort")[:k]
         elif mode == "random":
             out[r] = rng.permutation(n)[:k]
         else:
@@ -49,31 +51,32 @@ def choose_indices(sel: SelectionResult, cache: SessionCache, cfg, mode: str, rn
     return out
 
 
-def build_session_tensors(cache: SessionCache, sel: SelectionResult, cfg, mode: str = "criteria", seed: int = 0) -> SessionTensors:
-    k = int(cfg.selection.top_k_per_region)
+def build_session_tensors(cache: SessionCache, sel: SelectionResult | None, cfg, mode: str = "criteria", seed: int = 0,
+                          trial_idx: np.ndarray | None = None) -> SessionTensors:
     rng = np.random.default_rng(seed)
-    idx = choose_indices(sel, cache, cfg, mode, rng)
-    bands = {kk: list(v) for kk, v in cfg.selection.bands_hz.items()}
-    x, spec, y, mask, uidx = {}, {}, {}, {}, {}
+    idx = choose_indices(sel, cache, cfg, mode, rng, trial_idx)
+    return tensors_from_indices(cache, idx, cfg)
+
+
+def tensors_from_indices(cache: SessionCache, idx: dict[str, np.ndarray], cfg) -> SessionTensors:
+    """Model-ready tensors for an explicit choice of unit indices per region (zero-padded to K)."""
+    k = int(cfg.selection.top_k_per_region)
+    x, y, mask, uidx = {}, {}, {}, {}
     n_tr = cache.n_trials
     for r in REGIONS:
-        ii = idx[r]
+        ii = np.asarray(idx[r], dtype=int)[:k]
         T, Tt = cache.context[r].shape[2], cache.target[r].shape[2]
         xr = np.zeros((n_tr, k, T), np.float32)
         yr = np.zeros((n_tr, k, Tt), np.float32)
         m = np.zeros(k, bool)
         ui = np.full(k, -1, int)
         if len(ii):
-            xr[:, : len(ii)] = cache.context[r][:, ii]
-            yr[:, : len(ii)] = cache.target[r][:, ii]
+            xr[:, : len(ii)] = cache.context[r][:, ii].astype(np.float32)
+            yr[:, : len(ii)] = cache.target[r][:, ii].astype(np.float32)
             m[: len(ii)] = True
             ui[: len(ii)] = ii
-            pop = smooth_rates(cache.context[r][:, ii].mean(axis=1), cache.bin_ms, cfg.data.smoothing_sigma_ms)  # (n_tr, T)
-            sp = band_power_stft(pop, cache.bin_ms, bands).astype(np.float32)   # (n_tr, n_bands, T)
-        else:
-            sp = np.zeros((n_tr, len(bands), T), np.float32)
-        x[r], y[r], mask[r], uidx[r], spec[r] = xr, yr, m, ui, sp
-    return SessionTensors(cache.session, cache.dataset, x, spec, y, mask, uidx, cache.labels.copy(), cache.trials.copy())
+        x[r], y[r], mask[r], uidx[r] = xr, yr, m, ui
+    return SessionTensors(cache.session, cache.dataset, x, y, mask, uidx, cache.labels.copy(), cache.trials.copy())
 
 
 class TrialDataset(Dataset):
@@ -93,7 +96,6 @@ class TrialDataset(Dataset):
         return {
             "session": s,
             "x": {r: torch.from_numpy(st.x[r][t]) for r in REGIONS},
-            "spec": {r: torch.from_numpy(st.spec[r][t]) for r in REGIONS},
             "y": {r: torch.from_numpy(st.y[r][t]) for r in REGIONS},
             "mask": {r: torch.from_numpy(st.neuron_mask[r]) for r in REGIONS},
             "label": int(st.labels[t]),
@@ -108,8 +110,22 @@ def collate(batch: list[dict]) -> dict:
     assert len({b["session"] for b in batch}) == 1, "batches must come from a single session"
     out = {"session": batch[0]["session"], "label": torch.tensor([b["label"] for b in batch]),
            "trial": torch.tensor([b["trial"] for b in batch])}
-    for key in ("x", "spec", "y", "mask"):
+    for key in ("x", "y", "mask"):
         out[key] = {r: torch.stack([b[key][r] for b in batch]) for r in REGIONS}
+    return out
+
+
+def session_arrays(st: SessionTensors, idx: np.ndarray, device=None) -> dict:
+    """All trials ``idx`` of one session as one batch dict (used by the evaluation analyses)."""
+    idx = np.asarray(idx, dtype=int)
+    out = {"session": st.session, "label": torch.as_tensor(st.labels[idx]), "trial": torch.as_tensor(st.trials[idx])}
+    out["x"] = {r: torch.from_numpy(st.x[r][idx]) for r in REGIONS}
+    out["y"] = {r: torch.from_numpy(st.y[r][idx]) for r in REGIONS}
+    out["mask"] = {r: torch.from_numpy(np.tile(st.neuron_mask[r][None], (len(idx), 1))) for r in REGIONS}
+    if device is not None:
+        for key in ("x", "y", "mask"):
+            out[key] = {r: v.to(device) for r, v in out[key].items()}
+        out["label"] = out["label"].to(device)
     return out
 
 
@@ -152,16 +168,38 @@ def _split(idx: np.ndarray, labels: np.ndarray, frac: float, seed: int):
     return a, b
 
 
-def stratified_split(labels: np.ndarray, val_frac: float, test_frac: float, seed: int):
-    """Per-session stratified train/val/test split that tolerates tiny (or empty) classes/fractions."""
+def stratified_split(labels: np.ndarray, val_frac: float, test_frac: float, seed: int, scheme: str = "random",
+                     n_blocks: int = 5, guard: int = 3):
+    """Per-session train/val/test split that tolerates tiny (or empty) classes/fractions.
+
+    ``scheme='random'``: stratified random trials.  ``scheme='blocked'``: the test set is ``n_blocks``
+    contiguous blocks spread through the session (neighbouring trials share slow drift, so a random split
+    is optimistic); ``guard`` trials on either side of every block are dropped from train/val.
+    """
     idx = np.arange(len(labels))
+    if scheme == "blocked" and test_frac > 0 and len(labels) >= 4 * n_blocks:
+        n = len(labels)
+        n_test = int(round(test_frac * n))
+        per_block = max(1, n_test // n_blocks)
+        starts = np.linspace(0, n - per_block, n_blocks + 2)[1:-1].astype(int)
+        # deterministic jitter so different seeds see different blocks
+        rng = np.random.default_rng(seed)
+        starts = np.clip(starts + rng.integers(-per_block // 2, per_block // 2 + 1, size=n_blocks), 0, n - per_block)
+        te = np.unique(np.concatenate([np.arange(s0, s0 + per_block) for s0 in starts]))
+        excluded = np.unique(np.concatenate([np.arange(max(s0 - guard, 0), min(s0 + per_block + guard, n)) for s0 in starts]))
+        rest = np.setdiff1d(idx, excluded)
+        tr, va = _split(rest, labels, val_frac / max(1 - test_frac, 1e-9), seed)
+        return np.sort(tr), np.sort(va), np.sort(te)
     rest, te = _split(idx, labels, test_frac, seed)
     tr, va = _split(rest, labels, val_frac / max(1 - test_frac, 1e-9), seed)
     return np.sort(tr), np.sort(va), np.sort(te)
 
 
-def class_weights(labels: np.ndarray) -> torch.Tensor:
+def class_weights(labels: np.ndarray, cap: float | None = 5.0) -> torch.Tensor:
+    """Inverse-frequency class weights, capped (a handful of Ignore trials would otherwise get weight ~20)."""
     counts = np.bincount(labels, minlength=len(CLASSES)).astype(float)
     w = counts.sum() / (len(CLASSES) * np.maximum(counts, 1))
+    if cap is not None:
+        w = np.minimum(w, float(cap))
     w[counts == 0] = 0.0
     return torch.tensor(w, dtype=torch.float32)
