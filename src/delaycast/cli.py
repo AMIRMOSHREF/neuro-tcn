@@ -81,9 +81,20 @@ def cmd_inspect(cfg: Config, args) -> None:
         for k in data.files:
             arr = data[k]
             print(f"  {k:24s} shape={arr.shape} dtype={arr.dtype}")
-        from .data.rasters import normalize_region
-        regs, cnt = np.unique([normalize_region(r) or "unknown" for r in np.asarray(data["brain_region"]).astype(str)], return_counts=True)
-        print("  regions:", dict(zip(regs, cnt)))
+        # Route through the same schema reader the cache uses, so what is printed is what gets binned
+        # (both NPZ schemas, ragged / NaN-padded / single-unit spike containers).
+        from .data.rasters import normalize_region, spikes_by_region
+        try:
+            by_region = spikes_by_region(data)
+        except (KeyError, ValueError) as e:
+            print(f"  regions: unreadable ({e})")
+        else:
+            print("  regions:", {r: len(units) for r, (units, _) in by_region.items()})
+            print("  spikes: ", {r: int(sum(len(u) for u in units)) for r, (units, _) in by_region.items()})
+        if "brain_region" in data.files:
+            unknown = [r for r in np.asarray(data["brain_region"]).astype(str).ravel() if normalize_region(r) is None]
+            if unknown:
+                print(f"  unknown region labels ({len(unknown)} units): {sorted(set(unknown))}")
 
 
 def cmd_cache(cfg: Config, args) -> None:

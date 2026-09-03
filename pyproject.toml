@@ -25,3 +25,6 @@ delaycast = "delaycast.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+markers = ["slow: end-to-end synthetic pipeline tests (~1-2 min)"]

@@ -14,11 +14,13 @@ REGION_LABELS = {
     "STR_L": "left Striatum",
     "STR_R": "right Striatum",
 }
+# Hemisphere pairs share a hue (blue = ALM, purple = striatum) at two lightness levels: a colour-blind
+# reader separates the areas by hue, a grey-scale print separates the hemispheres by lightness.
 REGION_COLORS = {
-    "ALM_L": "#1f77b4",
-    "ALM_R": "#ff7f0e",
-    "STR_L": "#2ca02c",
-    "STR_R": "#d62728",
+    "ALM_L": "#1f4e9c",
+    "ALM_R": "#7fb2e5",
+    "STR_L": "#6a2c91",
+    "STR_R": "#c39bd3",
 }
 CLASSES = ("Ignore", "Left", "Right")
 CLASS_TO_IDX = {c: i for i, c in enumerate(CLASSES)}

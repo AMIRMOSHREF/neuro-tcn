@@ -2,7 +2,11 @@
 
 All functions operate on every unit at once (units along the last axis) so that thousands of units and
 dozens of bootstrap resamples cost milliseconds instead of hundreds of thousands of scipy calls. The
-results are numerically identical to ``scipy.stats.kruskal`` / ``scipy.stats.spearmanr`` (tie-corrected).
+results are numerically identical to ``scipy.stats.kruskal`` / ``scipy.stats.spearmanr`` /
+``scipy.stats.mannwhitneyu(method="asymptotic", use_continuity=False)`` /
+``scipy.stats.wilcoxon(correction=False, method="approx")`` (all tie-corrected).  The tie term
+``sum(t^3 - t)`` is obtained for all columns at once from run lengths of the column-sorted ranks
+(``_tie_term``), so no Python loop over units remains.
 """
 from __future__ import annotations
 
@@ -29,22 +33,33 @@ def bh_fdr(p: np.ndarray) -> np.ndarray:
     return q
 
 
-def _tie_correction(ranks: np.ndarray) -> np.ndarray:
-    """1 - sum(t^3 - t) / (n^3 - n) per column of a (n, m) rank matrix."""
+def _tie_term(ranks: np.ndarray) -> np.ndarray:
+    """``sum(t^3 - t)`` over the tie groups of every column of an (n, m) rank matrix, without a column loop.
+
+    The columns are sorted, a run of equal values is a tie group, and the run lengths are counted with one
+    ``bincount`` over ``(column, run id)`` keys where the run id is the cumulative number of value changes.
+    NaN entries (used by ``wilcoxon_vectorised`` for zero differences) compare unequal to everything, so
+    each forms a run of length 1 and contributes nothing - exactly the "ignore zeros" behaviour wanted.
+    Groups of size 1 contribute ``1 - 1 = 0``, so no filtering is required.
+    """
     n, m = ranks.shape
-    corr = np.ones(m)
-    if n < 2:
-        return corr
+    if n < 2 or m == 0:
+        return np.zeros(m)
     srt = np.sort(ranks, axis=0)
-    for j in range(m):
-        col = srt[:, j]
-        # run lengths of tied ranks
-        change = np.r_[True, col[1:] != col[:-1]]
-        counts = np.diff(np.r_[np.flatnonzero(change), n])
-        t = counts[counts > 1]
-        if t.size:
-            corr[j] = 1.0 - float(np.sum(t ** 3 - t)) / float(n ** 3 - n)
-    return corr
+    change = np.ones((n, m), dtype=bool)
+    change[1:] = srt[1:] != srt[:-1]
+    run_id = np.cumsum(change, axis=0) - 1                     # 0-based run index inside each column
+    key = run_id + np.arange(m, dtype=np.int64)[None, :] * n   # unique (column, run) key
+    t = np.bincount(key.ravel(), minlength=n * m).reshape(m, n).astype(np.int64)
+    return (t ** 3 - t).sum(axis=1).astype(float)
+
+
+def _tie_correction(ranks: np.ndarray) -> np.ndarray:
+    """1 - sum(t^3 - t) / (n^3 - n) per column of a (n, m) rank matrix (vectorised over columns)."""
+    n, m = ranks.shape
+    if n < 2:
+        return np.ones(m)
+    return 1.0 - _tie_term(ranks) / float(n ** 3 - n)
 
 
 def kruskal_vectorised(values: np.ndarray, labels: np.ndarray, min_per_group: int = 2) -> tuple[np.ndarray, np.ndarray]:
@@ -168,6 +183,11 @@ def wilcoxon_vectorised(d: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     dropped as in scipy's default ``zero_method='wilcox'``). Returns (effect, p) where ``effect`` is the
     fraction of positive minus negative differences (in [-1, 1]); columns with < 5 non-zero differences get
     NaN.
+
+    Fully vectorised: zero differences are turned into NaN before ranking ``|d|`` with
+    ``rankdata(nan_policy="omit")`` (NaNs get NaN ranks and do not consume ranks), and the tie term of the
+    variance comes from ``_tie_term`` on the same NaN-carrying rank matrix.  Identical to
+    ``scipy.stats.wilcoxon(correction=False, method="approx")`` for every column with >= 5 non-zeros.
     """
     d = np.asarray(d, dtype=float)
     n_all, m = d.shape
@@ -179,22 +199,10 @@ def wilcoxon_vectorised(d: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     if not ok.any():
         return effect, p
     absd = np.where(nz, np.abs(d), np.nan)
-    # rank |d| among the non-zero entries of each column (NaNs pushed to the end and ignored)
-    ranks = np.zeros_like(d)
-    for j in np.flatnonzero(ok):
-        v = absd[nz[:, j], j]
-        ranks[nz[:, j], j] = rankdata(v)
-    r_pos = np.where(d > 0, ranks, 0.0).sum(axis=0)
+    ranks = rankdata(absd, axis=0, nan_policy="omit")   # NaN where d == 0, average ranks elsewhere
+    r_pos = np.where(d > 0, np.nan_to_num(ranks, nan=0.0), 0.0).sum(axis=0)
     mu = n * (n + 1) / 4.0
-    var = n * (n + 1) * (2 * n + 1) / 24.0
-    # tie correction
-    for j in np.flatnonzero(ok):
-        v = np.sort(ranks[nz[:, j], j])
-        change = np.r_[True, v[1:] != v[:-1]]
-        counts = np.diff(np.r_[np.flatnonzero(change), len(v)])
-        t = counts[counts > 1]
-        if t.size:
-            var[j] -= np.sum(t ** 3 - t) / 48.0
+    var = n * (n + 1) * (2 * n + 1) / 24.0 - _tie_term(ranks) / 48.0
     with np.errstate(divide="ignore", invalid="ignore"):
         z = (r_pos - mu) / np.sqrt(var)
     pv = 2 * stats.norm.sf(np.abs(z))

@@ -64,7 +64,8 @@ def tensors_from_indices(cache: SessionCache, idx: dict[str, np.ndarray], cfg) -
     x, y, mask, uidx = {}, {}, {}, {}
     n_tr = cache.n_trials
     for r in REGIONS:
-        ii = np.asarray(idx[r], dtype=int)[:k]
+        ii = np.asarray(idx[r], dtype=int)
+        ii = ii[ii >= 0][:k]          # -1 marks an empty (padded) slot in saved checkpoints; never an index
         T, Tt = cache.context[r].shape[2], cache.target[r].shape[2]
         xr = np.zeros((n_tr, k, T), np.float32)
         yr = np.zeros((n_tr, k, Tt), np.float32)

@@ -115,3 +115,22 @@ def test_data2_split_region_and_singular_epoch_schema(tmp_path):
 
 def test_class_names():
     assert CLASSES == ("Ignore", "Left", "Right")
+
+
+def test_delaycast_default_config_contract():
+    """The defaults the verification tests (causality / selection / pipeline) and the report rely on."""
+    from delaycast import CLASSES as DC_CLASSES, REGIONS as DC_REGIONS
+    from delaycast.config import load_config as load_delaycast_config
+
+    cfg = load_delaycast_config(None)
+    assert DC_REGIONS == ("ALM_L", "ALM_R", "STR_L", "STR_R") and DC_CLASSES == ("Ignore", "Left", "Right")
+    assert int(cfg.selection.min_criteria) == 2 and float(cfg.selection.min_stability) == 0.6
+    assert int(cfg.selection.top_k_per_region) == 32 and float(cfg.selection.fdr_q) == 0.05
+    assert set(cfg.selection.bands_hz) == {"slow", "theta", "beta"}
+    assert cfg.model.spectral_branch == "bands" and cfg.model.neuron_gate_penalty == "hoyer"
+    assert int(cfg.data.bin_ms) == 10 and int(cfg.data.target_bin_ms) == 50
+    assert int(cfg.data.context.delay_ms) // int(cfg.data.bin_ms) == 120
+    assert int(cfg.data.target.response_ms) // int(cfg.data.target_bin_ms) == 30
+    # dotted overrides parse scalars and create nested paths
+    cfg2 = load_delaycast_config(None, ["model.d_model=32", "train.epochs=4", "evaluate.new.flag=true"])
+    assert cfg2.model.d_model == 32 and cfg2.train.epochs == 4 and cfg2.get_path("evaluate.new.flag") is True

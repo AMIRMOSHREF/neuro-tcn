@@ -25,6 +25,9 @@ data:
     require_csv_row: false         # Dataset B: drop trial if no matching audited CSV row
     csv_exclude_photostim: true
     csv_exclude_auto_water: true
+    max_delay_dev_ms: 15           # drop a trial whose delay length deviates more than this from context.delay_ms
+                                   # (the audited logs guarantee 1.2 s; anything else is an epoch-extraction error;
+                                   # 15 ms tolerates float epoch rounding, i.e. at most a +-1..2 bin length fix)
     min_trials_per_class: 3        # sessions with fewer trials in a class are still used but flagged
 
 selection:
@@ -44,8 +47,10 @@ selection:
   coupling_n_perm: 500        # circular-shift permutations for the coupling (C) null on the full fit set ...
   subsample_n_perm: 100       # ... and inside each stability subsample
   min_ignore_trials: 8        # the descriptive Ignore-vs-lick test needs at least this many Ignore trials
-  n_freqs_per_band: 5         # CWT scales per band (fewer = faster; the W statistic averages over them)
-  spectral_candidates: screened   # which units get the (expensive) CWT: screened | floor | all
+  n_freqs_per_band: 5         # CWT scales per band (the W statistic averages over them)
+  min_cwt_freq_hz: 2          # lowest wavelet frequency (a Morlet below ~2 Hz spans more than the 1.2 s delay)
+  spectral_candidates: all    # which units get the CWT: all (default, no dependence on trial subsets) | floor | screened
+  cwt_units_per_block: 128    # units per CWT block (bounds transient memory: n_trials x block x T floats)
   weights:                    # weights of the -log10(q) terms in the score (tie-breaker after stability)
     selectivity: 1.0
     coupling: 1.0
@@ -117,7 +122,8 @@ evaluate:
   neuron_importance: true       # per-neuron permutation-occlusion importance (one batched forward per region)
 
 figures:
-  dpi: 220
+  dpi: 300                     # publication resolution (Figure 1 is a 2000-row raster)
   raster_trial: null           # path to a specific NPZ to plot; default = first Left trial of first session
+  raster_row_order: status     # Figure 1 row order inside each region: status (selected first) | recording
 
 output_dir: "outputs/delaycast"

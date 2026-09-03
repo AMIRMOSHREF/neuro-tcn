@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -302,7 +303,9 @@ def linear_baselines(tensors, splits, caches, cfg, unit_index: dict, rng: np.ran
             if feats.shape[1] == 0:
                 continue
             try:
-                clf = _fit_logreg(feats[tr], y[tr], kind=kind, C=best_c if kind == "pca" else None)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")      # sklearn penalty/l1_ratio deprecation chatter, convergence notes
+                    clf = _fit_logreg(feats[tr], y[tr], kind=kind, C=best_c if kind == "pca" else None)
             except Exception as e:  # pragma: no cover
                 log.warning("baseline %s failed for %s: %s", name, t.session, e)
                 continue

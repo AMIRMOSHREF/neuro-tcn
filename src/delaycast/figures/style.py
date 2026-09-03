@@ -19,6 +19,7 @@ Design rules (from the figure review) that all figure modules follow:
 from __future__ import annotations
 
 import matplotlib as mpl
+from matplotlib.cm import ScalarMappable
 from matplotlib.colors import ListedColormap
 
 from .. import REGION_COLORS  # single source of truth for the region colours
@@ -38,13 +39,20 @@ MODE_COLORS = {
 # stages are greys of decreasing darkness so the strip reads as a funnel even without a legend.
 STATUS_COLORS = {"selected": None, "eligible": "#9a9a9a", "floor": "#cfcfcf", "below_floor": "#ededed"}
 STATUS_ORDER = ("selected", "eligible", "floor", "below_floor")
+STATUS_CODES = {s: i for i, s in enumerate(STATUS_ORDER)}  # integer code used by the status strip / row sort
 STATUS_LABELS = {"selected": "selected", "eligible": "eligible, not selected",
                  "floor": ">= floor, < 2 criteria", "below_floor": "below floor"}
+# "stable but beyond K" is a funnel stage, not a unit status; it sits between eligible and selected.
+STABLE_COLOR = "#6e6e6e"
 
 CRITERIA = [("c_selectivity", "S", "choice selectivity"), ("c_coupling", "C", "delay->response coupling"),
             ("c_spectral", "W", "wavelet band-power selectivity"), ("c_ramp", "R", "ramping")]
 
+# Short region names for dense labels (tables, funnel ticks); ``REGION_LABELS`` stays the long form.
+REGION_SHORT = {"ALM_L": "left ALM", "ALM_R": "right ALM", "STR_L": "left STR", "STR_R": "right STR"}
+
 FONT_STACK = ["DejaVu Sans", "Arial", "Helvetica", "sans-serif"]
+MONO_STACK = ["DejaVu Sans Mono", "Menlo", "Consolas", "monospace"]
 
 
 def status_colors(region: str) -> list[str]:
@@ -63,6 +71,7 @@ def apply_style(dpi: int | float | None = None) -> None:
     mpl.rcParams.update({
         "font.family": "sans-serif",
         "font.sans-serif": FONT_STACK,
+        "font.monospace": MONO_STACK,
         "font.size": 7,
         "axes.titlesize": 7.5,
         "axes.labelsize": 7,
@@ -75,6 +84,8 @@ def apply_style(dpi: int | float | None = None) -> None:
         "ytick.major.width": 0.6,
         "xtick.major.size": 2.5,
         "ytick.major.size": 2.5,
+        "xtick.major.pad": 2.0,
+        "ytick.major.pad": 2.0,
         "legend.fontsize": 6,
         "legend.frameon": False,
         "legend.handlelength": 1.4,
@@ -95,3 +106,21 @@ def panel_label(ax, text: str, x: float = -0.08, y: float = 1.04, **kw) -> None:
     style = dict(fontsize=9, fontweight="bold", va="bottom", ha="left", clip_on=False)
     style.update(kw)
     ax.text(x, y, text, transform=ax.transAxes, **style)
+
+
+def small_colorbar(fig, rect, cmap, norm, label: str, ticks=None, ticklabels=None, fontsize: float = 5.0):
+    """Horizontal colour bar in figure coordinates (``rect`` = [x0, y0, w, h]) with a label underneath.
+
+    Legends of dense heat-strips are drawn away from the strip (in the footer) so that the strip itself
+    keeps every pixel for data; the bar is deliberately tiny because it only needs to convey direction
+    and range, not exact values (those are in the CSV tables)."""
+    cax = fig.add_axes(rect)
+    cb = fig.colorbar(ScalarMappable(norm=norm, cmap=cmap), cax=cax, orientation="horizontal")
+    cb.outline.set_linewidth(0.4)
+    if ticks is not None:
+        cb.set_ticks(ticks)
+    if ticklabels is not None:
+        cb.set_ticklabels(ticklabels)
+    cax.tick_params(labelsize=fontsize - 0.5, length=1.5, width=0.4, pad=1)
+    cb.set_label(label, fontsize=fontsize, labelpad=1.5)
+    return cb

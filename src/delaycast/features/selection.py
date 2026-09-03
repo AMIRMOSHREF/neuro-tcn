@@ -89,8 +89,8 @@ def _features_key(cfg, cache: SessionCache | None = None) -> str:
     payload = {"late": sel.late_delay_ms, "win": sel.get_path("window_ms", 200), "step": sel.get_path("window_step_ms", 50),
                "bands": sel.bands_hz.to_plain() if hasattr(sel.bands_hz, "to_plain") else dict(sel.bands_hz),
                "wavelet": sel.wavelet, "sigma": cfg.data.smoothing_sigma_ms, "floor": [sel.min_rate_hz, sel.min_active_trial_frac],
-               "cand": sel.get_path("spectral_candidates", "screened"), "nf": sel.get_path("n_freqs_per_band", 5),
-               "fmin": sel.get_path("min_cwt_freq_hz", 2.0), "cache": _cache_key(cfg), "v": 4}
+               "cand": sel.get_path("spectral_candidates", "all"), "nf": sel.get_path("n_freqs_per_band", 5),
+               "fmin": sel.get_path("min_cwt_freq_hz", 2.0), "cache": _cache_key(cfg), "v": 5}
     if cache is not None:
         payload["n_trials"] = int(cache.n_trials)
         payload["n_units"] = {r: int(cache.context[r].shape[1]) for r in REGIONS}
@@ -127,12 +127,12 @@ def _class_ramp(diff: np.ndarray, labels: np.ndarray, min_trials: int = 5) -> tu
 def _spectral_candidates(counts, late_rate, early_rate, resp_rate, labels, floor, cfg, rng) -> np.ndarray:
     """Units for which the (expensive) CWT is computed.
 
-    ``all``: every unit; ``floor``: every unit passing the activity floor; ``screened`` (default): floor units
-    with a liberal (uncorrected p < 0.05) hint of Left/Right selectivity, coupling or ramping.  The screen uses
-    statistics other than the wavelet test itself, so the FDR of W (computed among the screened units) is not
-    biased, and a unit that could only satisfy W would not reach ``min_criteria`` >= 2 anyway.
+    ``all`` (default): every unit; ``floor``: every unit passing the activity floor; ``screened``: floor units
+    with a liberal (uncorrected p < 0.05) hint of Left/Right selectivity, coupling or ramping on *all* trials.
+    The two restricted modes are kept for very large recordings only: they make the set of W hypotheses depend
+    on the whole session (including test trials), which ``all`` avoids.
     """
-    mode = cfg.selection.get_path("spectral_candidates", "screened")
+    mode = cfg.selection.get_path("spectral_candidates", "all")
     idx = np.flatnonzero(floor)
     if mode == "all":
         return np.arange(counts.shape[1])
@@ -174,14 +174,24 @@ def compute_region_features(cache: SessionCache, cfg, region: str) -> RegionFeat
     if n_units == 0:
         return RegionFeatures(region, cache.unit_ids[region], counts, late_rate, early_rate, resp_rate, win_counts, win_starts,
                               np.zeros((n_tr, 0, len(bands)), np.float32), list(bands), np.zeros(0, int), dur_s, bin_ms, win_ms, late_ms)
-    floor = _floor_mask(counts, dur_s, cfg)
-    cand = _spectral_candidates(counts, late_rate, early_rate, resp_rate, cache.labels, floor, cfg, np.random.default_rng(0))
-    if cand.size:
-        rates = smooth_rates(X[:, cand].reshape(n_tr * cand.size, T).astype(np.float32), bin_ms, cfg.data.smoothing_sigma_ms)
-        bp, names = band_power_cwt(rates, bin_ms, bands, sel.wavelet, n_freqs_per_band=int(sel.get_path("n_freqs_per_band", 5)))
-        bp = bp.reshape(n_tr, cand.size, -1)
+    mode = str(sel.get_path("spectral_candidates", "all"))
+    if mode == "all":
+        # Default: every unit gets the CWT (the impulse-response implementation makes 2000 units x 350 trials a
+        # few seconds), so the set of W hypotheses never depends on any trial subset or label.
+        cand = np.arange(n_units)
     else:
-        bp, names = np.zeros((n_tr, 0, len(bands)), np.float32), list(bands)
+        floor = _floor_mask(counts, dur_s, cfg)
+        cand = _spectral_candidates(counts, late_rate, early_rate, resp_rate, cache.labels, floor, cfg, np.random.default_rng(0))
+    names = list(bands)
+    bp = np.zeros((n_tr, cand.size, len(bands)), np.float32)
+    fmin = float(sel.get_path("min_cwt_freq_hz", 2.0))
+    n_freq = int(sel.get_path("n_freqs_per_band", 5))
+    block = max(1, int(sel.get_path("cwt_units_per_block", 128)))     # bounds the transient (n_tr * block, T) rate matrix
+    for i in range(0, cand.size, block):
+        cb = cand[i: i + block]
+        rates = smooth_rates(X[:, cb].reshape(n_tr * cb.size, T).astype(np.float32), bin_ms, cfg.data.smoothing_sigma_ms)
+        bp_b, names = band_power_cwt(rates, bin_ms, bands, sel.wavelet, n_freqs_per_band=n_freq, min_freq_hz=fmin)
+        bp[:, i: i + cb.size] = bp_b.reshape(n_tr, cb.size, -1)
     return RegionFeatures(region, cache.unit_ids[region], counts, late_rate, early_rate, resp_rate, win_counts, win_starts,
                           bp, names, cand, dur_s, bin_ms, win_ms, late_ms)
 

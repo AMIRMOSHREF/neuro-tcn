@@ -35,14 +35,17 @@ def plot_time_frequency(cache: SessionCache, table: pd.DataFrame, cfg, trial_idx
             P = np.log10(cwt_scalogram(pop, bin_ms, freqs, cfg.selection.wavelet) + 1e-6)
             core = P[:, int(0.1 * T): int(0.9 * T)]  # ignore the cone of influence when setting the colour range
             vmin, vmax = np.percentile(core, 5), np.percentile(core, 98)
-            im = ax.pcolormesh(tvec, freqs, P, shading="auto", cmap="magma", vmin=vmin, vmax=vmax)
+            # viridis is the neutral sequential map of the colour system (no region / class hue is reused).
+            im = ax.pcolormesh(tvec, freqs, P, shading="auto", cmap="viridis", vmin=vmin, vmax=vmax)
             ax.set_yscale("log")
             ax.set_yticks([1, 2, 4, 8, 16, 30])
             ax.set_yticklabels(["1", "2", "4", "8", "16", "30"])
             for edge in (0.1 * T * bin_ms / 1000.0, 0.9 * T * bin_ms / 1000.0):
                 ax.axvline(edge, color="white", ls=":", lw=0.7)
-            plt.colorbar(im, ax=ax, pad=0.02, fraction=0.05, label="log10 power")
-        ax.set_title(f"{REGION_LABELS[r]} — CWT, trial {cache.trials[trial_idx]} ({CLASSES[y[trial_idx]]})", color=REGION_COLORS[r], loc="left")
+            cb = plt.colorbar(im, ax=ax, pad=0.02, fraction=0.05)
+            cb.set_label("log10 power", fontsize=6)
+            cb.ax.tick_params(labelsize=5.5)
+        ax.set_title(f"{REGION_LABELS[r]} - CWT, trial {cache.trials[trial_idx]} ({CLASSES[y[trial_idx]]})", color=REGION_COLORS[r], loc="left", fontweight="bold")
         ax.set_ylabel("frequency (Hz)")
         ax.set_xlabel("time from delay onset (s)")
         # Row 2: STFT band power over time per class (population of selected units).
@@ -56,10 +59,10 @@ def plot_time_frequency(cache: SessionCache, table: pd.DataFrame, cfg, trial_idx
                     continue
                 ax.plot(tvec, np.log1p(bp[m, b_i].mean(0)), color=CLASS_COLORS[c], lw=1.0, alpha=0.4 + 0.3 * b_i,
                         ls=["-", "--", ":"][b_i % 3], label=f"{bname} · {c}" if j == 0 else None)
-        ax.set_title("STFT band power (log1p), class means", loc="left", fontsize=8.5)
+        ax.set_title("STFT band power (log1p), class means", loc="left")
         ax.set_xlabel("time from delay onset (s)")
         if j == 0:
-            ax.legend(ncol=3, fontsize=6, loc="upper left")
+            ax.legend(ncol=3, loc="upper left")
         # Row 3: per-unit CWT band power (delay mean) by class for the selected units.
         ax = axes[2, j]
         if len(units):
@@ -77,12 +80,12 @@ def plot_time_frequency(cache: SessionCache, table: pd.DataFrame, cfg, trial_idx
                        color=CLASS_COLORS[c], label=c if j == 0 else None, capsize=2)
             ax.set_xticks(np.arange(len(names)))
             ax.set_xticklabels([f"{n}\n{bands[n][0]}-{bands[n][1]} Hz" for n in names])
-        ax.set_title("CWT band power, selected units (delay mean)", loc="left", fontsize=8.5)
+        ax.set_title("CWT band power, selected units (delay mean)", loc="left")
         ax.set_ylabel("log(1+power)")
         if j == 0:
-            ax.legend(fontsize=6.5)
+            ax.legend()
     panel_label(axes[0, 0], "A"); panel_label(axes[1, 0], "B"); panel_label(axes[2, 0], "C")
-    fig.suptitle(f"Time-frequency features of the delay epoch — session {cache.session}", fontsize=12)
+    fig.suptitle(f"Time-frequency features of the delay epoch - session {cache.session}", fontsize=9, fontweight="bold")
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=int(cfg.figures.dpi))
