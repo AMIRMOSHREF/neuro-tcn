@@ -89,7 +89,11 @@ Statistics are computed on the **fit trials only** — the training + validation
 | I | no-lick selectivity *(descriptive)* | Mann-Whitney U Ignore vs lick trials, only with ≥ 8 Ignore trials | Ignore is too rare to enter the eligibility rule |
 
 All p-values are Benjamini-Hochberg corrected across the floor-passing units of the session (q < 0.05). A unit is
-**eligible** if it passes the floor and satisfies ≥ 2 of {S, C, W, R}; T and I never count.
+**eligible** if it passes the floor and satisfies ≥ 2 of {S, C, W, R} **including at least one of {S, W}**; T and I
+never count. The direction requirement (`selection.require_label_criterion`) was added after the first real-data run:
+C and R are label-free (a unit that ramps and couples on every trial passes both under any label permutation), so
+without it the label-permuted stability null reached 0.88 — the "criteria" set could be assembled from units that carry
+no direction information, which is what a rate-matched control set is. Held-out (label-free) selection cannot apply it.
 
 **Stability selection** (Meinshausen & Bühlmann 2010): the criteria and the top-K ranking are recomputed on 50
 stratified half-subsamples (without replacement) of the fit trials; a unit's *stability* is its selection frequency.
@@ -152,14 +156,24 @@ Everything is inference-only on the test trials; all quantities are stored per s
 * **Context sweep** (only the last τ ms visible) → **context sufficiency index** τ<sub>95</sub>: the shortest context
   keeping ≥ 95 % of full-context accuracy, with a bootstrap + isotonic-regression CI (balanced-accuracy and log-loss
   versions), and the same statistic for a tuned linear decoder on *all* units (`tau95_linear_ms`, model-free).
-* **Temporal occlusion map**: each 200 ms window is replaced by the same window of another test trial of the same
-  session (permutation occlusion preserves marginal statistics and destroys trial information); Δ balanced accuracy,
-  Δ log-loss and Δ forecast deviance (backbone-only variant with the persistence input held fixed).
+* **Temporal occlusion map**: each 200 ms window is masked (zero occlusion, `evaluate.occlusion: zero`) — the same
+  intervention as the training-time window dropout, so the occluded input is in-distribution; the permutation variant
+  (window replaced by the same window of another test trial) is available as `permute`. Δ balanced accuracy, Δ log-loss
+  and Δ forecast deviance (backbone-only variant with the persistence input held fixed).
 * **Region ablation**: permutation of a whole region and in-distribution region drop.
 * **Neuron importance**: permutation occlusion of every selected neuron → Δ log-loss, Δ balanced accuracy, Δ forecast
   deviance of the *other* neurons; joined with gates and criteria (`neuron_importance.csv`); agreement summarised
   within session × region (Spearman ρ, sign test across cells).
-* **Forecast**: Poisson deviance explained vs the training-PSTH null, for the model and for persistence alone.
+* **Forecast**: Poisson deviance explained vs the training-PSTH null, for the model, for persistence alone (late-delay
+  rate carried forward; on real data far below the null, so it is reported, not used as the comparator) and for the
+  class-conditional oracle (mean response PSTH of the true class; a model above it forecasts trial-specific structure
+  beyond class identity).
+* **Control arms of the same size**: `rate` and `random` take per session × region as many units as the criteria
+  selection produced in that split (K<sub>eff</sub>), never K; a session with an empty criteria set is excluded from
+  every criteria-arm comparison in the report and listed in its header.
+* **Per-session replication** (supplementary): for arm comparisons with per-trial predictions the report counts the
+  sessions whose own trial-bootstrap CI (matched test trials, averaged over seeds) excludes 0 in the predicted
+  direction; it never changes a verdict but is the evidence a four-recording corpus can offer.
 * **Baselines**: tuned logistic regression (inner CV over C) on all units (delay mean + late-delay mean per unit),
   PCA-50, L1 (its sparse set's Jaccard overlap with the criteria set), the train-selected K units, ALM-only and
   STR-only selected units, and a trial-index drift control.
@@ -179,7 +193,7 @@ Everything is inference-only on the test trials; all quantities are stored per s
 > recorded units (P1a, P1b) and above rate-matched and random subsets of the same size (P2); **(ii)** the last 500 ms
 > before the go cue retain ≥ 95 % of full-delay accuracy for both the selected-unit model and the all-unit linear
 > decoder, and removing the last 400 ms costs more than removing any earlier 400 ms (P3); **(iii)** the selected
-> units' late-delay activity forecasts their own response-epoch activity beyond a persistence baseline (P4);
+> units' late-delay activity forecasts their own response-epoch activity beyond the units' mean response (P4);
 > **(iv)** removing ALM input degrades Left/Right decoding more than removing striatal input (P5a), whereas striatal
 > involvement in no-lick trials is exploratory because Ignore trials are rare and confounded with engagement (P5b);
 > **(v)** model-based neuron importance agrees with the model-free criteria (P6); **(vi)** the causal

@@ -133,27 +133,35 @@ def cached_selection(cfg: Config, cache: SessionCache, idx: np.ndarray | None, s
 
 
 def prepare_sessions(cfg: Config, caches: dict[str, SessionCache], mode: str = "criteria", splits: dict | None = None,
-                     seed: int | None = None, holdout: list[str] | None = None):
+                     seed: int | None = None, holdout: list[str] | None = None, match_k: bool | None = None):
     """Neuron selection (criteria mode only) and model tensors.
 
     Sessions with train/val trials: criteria on the fit trials (train + val).  Held-out sessions:
     ``selection.holdout_mode`` = ``label_free`` (default; floor + coupling + net ramp on the *adapt* trials only,
-    no label ever read and no test trial ever touched) or ``adapt`` (full criteria on the adapt trials)."""
+    no label ever read and no test trial ever touched) or ``adapt`` (full criteria on the adapt trials).
+
+    ``rate`` / ``random`` control arms take, per session and region, as many units as the criteria selection of
+    the same split produced (K_eff), so that "above rate-matched and random subsets of the same size" is what is
+    tested (``selection.match_k_to_criteria``; ``match_k=False`` forces K, used by the negative-control fallback,
+    where the permuted-label criteria set is empty by construction)."""
     seed = int(cfg.train.seed) if seed is None else int(seed)
     held = set(holdout or [])
     holdout_mode = str(cfg.selection.get_path("holdout_mode", "label_free"))
+    if match_k is None:
+        match_k = bool(cfg.selection.get_path("match_k_to_criteria", True))
     selections, tensors = [], []
     for s, c in caches.items():
         idx = fit_trials(splits[s]) if splits is not None else None
-        if mode == "criteria":
+        need_sel = mode == "criteria" or (match_k and mode in ("rate", "random"))
+        sel = None
+        if need_sel:
             if s in held and holdout_mode == "label_free":
                 sel = cached_selection(cfg, c, idx, seed, label_free=True)
             else:
                 sel = cached_selection(cfg, c, idx if bool(cfg.selection.get_path("fit_on_train_only", True)) else None, seed)
-        else:
-            sel = None
-        selections.append(sel)
-        tensors.append(build_session_tensors(c, sel, cfg, mode=mode, seed=seed, trial_idx=idx))
+        k_per_region = {r: len(sel.selected[r]) for r in REGIONS} if (sel is not None and mode != "criteria") else None
+        selections.append(sel if mode == "criteria" else None)
+        tensors.append(build_session_tensors(c, sel, cfg, mode=mode, seed=seed, trial_idx=idx, k_per_region=k_per_region))
     return selections, tensors
 
 
@@ -379,7 +387,7 @@ def run_training(cfg: Config, mode: str = "criteria", out_dir: Path | None = Non
         # trivially at chance without exercising the training / evaluation path. Fall back to the label-free
         # ``rate`` units so the network is really trained on permuted labels (this is logged and recorded).
         log.warning("negative control: permuted-label selection is empty in every session; using rate-mode units")
-        selections, tensors = prepare_sessions(cfg, caches, mode="rate", splits=splits, seed=seed, holdout=_as_list(holdout))
+        selections, tensors = prepare_sessions(cfg, caches, mode="rate", splits=splits, seed=seed, holdout=_as_list(holdout), match_k=False)
         mode = "criteria(rate-fallback)"
     for s in selections:
         if s is not None:

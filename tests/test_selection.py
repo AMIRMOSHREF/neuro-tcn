@@ -41,12 +41,15 @@ CONSTANT = 3               # one spike in every bin of every trial: passes the f
 def make_cache(seed: int, plant: bool = True) -> SessionCache:
     """Poisson session with optional planted structure.
 
-    Planted units fire twice as much on Left trials (criterion S), ramp from 0.1x to 1.9x of their base rate
+    Planted units fire three times as much on Left trials (criterion S), ramp from 0.1x to 1.9x of their base rate
     across the delay (criterion R, present in every class) and share a per-trial log-normal gain between the
     last 400 ms of the delay and the response epoch (criterion C).  Background units are homogeneous Poisson.
     The effects are deliberately strong: a criterion must still reach q < 0.05 inside a 30-trial half-subsample
     (12 Left / 12 Right / 6 Ignore) for the unit to count as stable, and the Wilcoxon p of a 12-trial class
     cannot go below 0.002 x 3 (Bonferroni over classes), so a weak ramp would fail BH there for the wrong reason.
+    Since eligibility requires a direction criterion (S or W) in every half-subsample as well, the Left/Right
+    contrast is 3x: with the log-normal per-trial gain on the late delay, a 2x contrast fails BH in some
+    12-vs-12-trial subsamples and the unit looks unstable for a reason unrelated to what the test checks.
     """
     rng = np.random.default_rng(seed)
     labels = np.repeat([IGNORE, LEFT, RIGHT], [12, 24, 24])
@@ -61,7 +64,7 @@ def make_cache(seed: int, plant: bool = True) -> SessionCache:
             gain = np.exp(rng.normal(0.0, 0.8, size=N_TRIALS))
             for u in PLANTED:
                 lam[:, u, :] = base[u] * ramp[None]
-                lam[labels == LEFT, u, :] *= 2.0
+                lam[labels == LEFT, u, :] *= 3.0
                 lam[:, u, -40:] *= gain[:, None]
                 lam_t[:, u, :] *= gain[:, None]
         X = rng.poisson(lam).astype(np.uint8)
@@ -111,18 +114,42 @@ def test_eligibility_needs_two_scored_criteria():
         {**ones, "q_selectivity": 1e-9, "q_ramp": 1e-3},                  # S + R
         {**ones, "q_selectivity": 1e-9, "q_coupling": 1e-9, "q_spectral": 1e-9, "q_ramp": 1e-9, "pass_floor": False},
         {**ones, "q_locus": 1e-9, "q_ignore": 1e-9},                      # descriptive T + I only
+        {**ones, "q_coupling": 1e-9, "q_ramp": 1e-9},                     # C + R: two criteria, none about direction
+        {**ones, "q_spectral": 1e-6, "q_ramp": 1e-9},                     # W + R: direction through the spectral test
     ]
     df = pd.DataFrame(rows)
     df["pass_floor"] = df.get("pass_floor", True).fillna(True).astype(bool)
     df["label_free"] = False
     out = _flag_and_score(df, cfg)
-    assert out.c_selectivity.tolist() == [True, True, True, False]
-    assert out.n_criteria.tolist() == [1, 2, 4, 0]
-    assert out.eligible.tolist() == [False, True, False, False]
+    assert out.c_selectivity.tolist() == [True, True, True, False, False, False]
+    assert out.n_criteria.tolist() == [1, 2, 4, 0, 2, 2]
+    assert out.c_direction.tolist() == [True, True, True, False, False, True]
+    assert out.eligible.tolist() == [False, True, False, False, False, True]
     assert out.score.iloc[2] == -np.inf                                    # below the floor: never ranked
     assert out.c_locus.iloc[3] and out.c_ignore.iloc[3]
     assert out.score.iloc[3] == 0.0                                        # T and I are never in the score
     assert out.score.iloc[1] > out.score.iloc[0] > 0.0
+    # the direction requirement can be switched off (then C + R alone is enough)
+    cfg2 = load_config(None)
+    cfg2.set_path("selection.require_label_criterion", False)
+    assert _flag_and_score(df.copy(), cfg2).eligible.tolist() == [False, True, False, False, True, True]
+
+
+def test_control_arms_match_k_eff_of_the_criteria_set():
+    """rate / random take, per region, as many units as the criteria selection produced (never more than K)."""
+    from delaycast.data.dataset import choose_indices
+    cache = make_cache(seed=3)
+    cfg = load_config(None)
+    cfg.set_path("selection.top_k_per_region", 4)
+    rng = np.random.default_rng(0)
+    k_eff = {"ALM_L": 2, "ALM_R": 0, "STR_L": 4, "STR_R": 9}
+    for mode in ("rate", "random"):
+        idx = choose_indices(None, cache, cfg, mode, rng, k_per_region=k_eff)
+        assert {r: len(v) for r, v in idx.items()} == {"ALM_L": 2, "ALM_R": 0, "STR_L": 4, "STR_R": 4}
+        full = choose_indices(None, cache, cfg, mode, rng)
+        assert all(len(full[r]) == min(4, cache.context[r].shape[1]) for r in full)
+    rates = cache.context["ALM_L"].sum(axis=(0, 2))
+    assert set(choose_indices(None, cache, cfg, "rate", rng, k_per_region=k_eff)["ALM_L"]) == set(np.argsort(-rates)[:2])
 
 
 def test_label_free_eligibility_threshold():

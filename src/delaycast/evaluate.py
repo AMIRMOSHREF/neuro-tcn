@@ -203,13 +203,38 @@ def train_null(tensors: list[SessionTensors], splits: dict) -> dict:
     return null
 
 
+def train_null_by_class(tensors: list[SessionTensors], splits: dict) -> dict:
+    """Per-session, per-region, per-class mean response PSTH of the training (or adaptation) trials: (n_classes, K, T_tgt).
+
+    The *class-conditional oracle*: the best forecast that knows the true class but nothing trial-specific.  A
+    forecaster that beats it uses trial-by-trial delay information beyond the class identity.  Classes absent from
+    the training trials fall back to the class-free PSTH."""
+    null = {}
+    for t in tensors:
+        sp = splits[t.session]
+        idx = np.r_[sp.get("train", np.zeros(0, int)), sp.get("adapt", np.zeros(0, int))].astype(int)
+        if not len(idx):
+            idx = np.arange(t.n_trials)
+        lab = t.labels[idx]
+        per = {}
+        for r in REGIONS:
+            base = t.y[r][idx].mean(axis=0)
+            stack = np.stack([t.y[r][idx[lab == c]].mean(axis=0) if (lab == c).sum() else base for c in range(len(CLASSES))])
+            per[r] = torch.from_numpy(stack.astype(np.float32))
+        null[t.session] = per
+    return null
+
+
 def _dev_expl(dev: float, dev0: float) -> float:
     """1 - D(model)/D(null); NaN when the null deviance is 0 (no real neurons / no spikes), never a fake 1.0."""
     return float(1 - dev / dev0) if dev0 > 1e-8 else float("nan")
 
 
-def _deviance_terms(model, fc_log_rate, y, mask, null_mu, x, exclude_neuron: int | None = None) -> dict[str, tuple[float, float, float]]:
-    """(model, persistence, null) summed deviance per region; optionally excluding one neuron slot."""
+def _deviance_terms(model, fc_log_rate, y, mask, null_mu, x, exclude_neuron: int | None = None,
+                    class_mu: dict | None = None, labels=None) -> dict[str, tuple]:
+    """(model, persistence, null[, class-conditional oracle]) summed deviance per region; optionally excluding one
+    neuron slot.  The oracle term is appended only when ``class_mu`` (from :func:`train_null_by_class`) and the
+    true ``labels`` are given."""
     out = {}
     for r in REGIONS:
         m = mask[r].clone()
@@ -217,9 +242,13 @@ def _deviance_terms(model, fc_log_rate, y, mask, null_mu, x, exclude_neuron: int
             m[:, exclude_neuron] = False
         late = x[r][:, :, -model.late_bins:].mean(-1) * model.count_scale
         persist_mu = late[:, :, None].expand_as(y[r]).clamp(min=1e-3)
-        out[r] = (poisson_deviance(torch.exp(fc_log_rate[r]), y[r], m).item(),
-                  poisson_deviance(persist_mu, y[r], m).item(),
-                  poisson_deviance(null_mu[r][None].expand_as(y[r]), y[r], m).item())
+        terms = [poisson_deviance(torch.exp(fc_log_rate[r]), y[r], m).item(),
+                 poisson_deviance(persist_mu, y[r], m).item(),
+                 poisson_deviance(null_mu[r][None].expand_as(y[r]), y[r], m).item()]
+        if class_mu is not None and labels is not None:
+            lab = torch.as_tensor(np.asarray(labels), dtype=torch.long)
+            terms.append(poisson_deviance(class_mu[r][lab], y[r], m).item())
+        out[r] = tuple(terms)
     return out
 
 
@@ -410,11 +439,14 @@ def evaluate_run(run: dict, cfg, caches: dict | None = None) -> dict:
     occl = str(cfg.evaluate.get_path("occlusion", "permute"))
     tests = test_sets(tensors, splits)
     null = train_null(tensors, splits)
+    null_cls = train_null_by_class(tensors, splits)
     t_ctx, bin_ms = model.t_ctx, float(cfg.data.bin_ms)
     unit_index = {t.session: {r: t.unit_index[r] for r in REGIONS} for t in tensors}
     results: dict = {"mode": run.get("mode"), "seed": int(run.get("seed", cfg.train.seed)), "holdout": run.get("holdout", []),
                      "eval_mode": str(cfg.train.eval_mode), "negative_control": bool(run.get("negative_control", False)),
-                     "spectral_branch": model.spectral_branch, "adapt_info": run.get("adapt_info", {}), "occlusion": occl}
+                     "spectral_branch": model.spectral_branch, "adapt_info": run.get("adapt_info", {}), "occlusion": occl,
+                     # units actually used per session x region (K_eff): the report excludes sessions with an empty set
+                     "n_selected": {t.session: {r: int(np.asarray(t.neuron_mask[r]).sum()) for r in REGIONS} for t in tensors}}
     if not tests:
         log.warning("no test trials - nothing to evaluate")
         return results
@@ -439,18 +471,20 @@ def evaluate_run(run: dict, cfg, caches: dict | None = None) -> dict:
                  ).to_csv(out_dir / "test_predictions.csv", index=False)
 
     # ---- forecasting
-    fc_tot = {r: np.zeros(3) for r in REGIONS}
+    fc_tot = {r: np.zeros(4) for r in REGIONS}
     fc_sess = []
     for s, b in tests.items():
-        terms = _deviance_terms(model, base[s]["forecast"], b["y"], b["mask"], null[s], b["x"])
+        terms = _deviance_terms(model, base[s]["forecast"], b["y"], b["mask"], null[s], b["x"], class_mu=null_cls[s], labels=b["label"].numpy())
         row = {"session": s}
         for r in REGIONS:
             fc_tot[r] += np.array(terms[r])
             row[f"deviance_explained_{r}"] = _dev_expl(terms[r][0], terms[r][2])
             row[f"deviance_explained_persistence_{r}"] = _dev_expl(terms[r][1], terms[r][2])
+            row[f"deviance_explained_classmean_{r}"] = _dev_expl(terms[r][3], terms[r][2])
         fc_sess.append(row)
     results["forecast"] = {**{f"deviance_explained_{r}": _dev_expl(fc_tot[r][0], fc_tot[r][2]) for r in REGIONS},
                            **{f"deviance_explained_persistence_{r}": _dev_expl(fc_tot[r][1], fc_tot[r][2]) for r in REGIONS},
+                           **{f"deviance_explained_classmean_{r}": _dev_expl(fc_tot[r][3], fc_tot[r][2]) for r in REGIONS},
                            "per_session": fc_sess}
 
     # ---- context sweep + CSI

@@ -8,6 +8,15 @@ Wilcoxon signed-rank across sessions plus a session-level bootstrap CI of the me
 * **inconclusive** when it does not (never "refuted" from a point comparison),
 * **not run / not testable** when the required arms or trial counts are missing.
 
+Two rules apply to every criteria-arm comparison. **Same size**: the rate-matched and random control sets take, per
+session and region, exactly as many units as the criteria selection produced in that split (K<sub>eff</sub> ≤ K), so
+the comparison is between unit *choices*, not unit *counts*. **Empty criteria set**: a session in which no unit
+passed the stability rule (K<sub>eff</sub> = 0 in every region) is a selection failure, not a measurement; it is
+excluded from the paired comparisons and listed in the report header. Where both arms have per-trial predictions the
+report also states in how many sessions the prediction **replicates** on the session's own test trials (trial
+bootstrap of matched trials, averaged over seeds) — supplementary evidence for small corpora that never changes a
+verdict.
+
 ## The claim
 
 > During the 1.2 s delay of the auditory delayed-response task, (i) a criterion-selected subset of at most 32 units per
@@ -16,7 +25,8 @@ Wilcoxon signed-rank across sessions plus a session-level bootstrap CI of the me
 > recorded units and above rate-matched and random subsets of the same size; (ii) the last 500 ms before the go cue
 > retain ≥ 95 % of full-delay accuracy for both the selected-unit model and the all-unit linear decoder, and removing
 > the last 400 ms costs more than removing any earlier 400 ms; (iii) the selected units' late-delay activity forecasts
-> their own response-epoch activity beyond a persistence baseline; (iv) removing ALM input degrades Left/Right decoding
+> their own response-epoch activity beyond the units' mean response (Poisson deviance explained > 0; persistence and
+> the class-conditional oracle are reported); (iv) removing ALM input degrades Left/Right decoding
 > more than removing striatal input, whereas striatal involvement in no-lick trials is exploratory; (v) model-based
 > neuron importance agrees with the model-free criteria; (vi) the causal spectro-temporal population branch adds
 > accuracy beyond a matched population-rate control; and (vii) a backbone trained on one dataset decodes the other
@@ -29,9 +39,9 @@ Wilcoxon signed-rank across sessions plus a session-level bootstrap CI of the me
 |---|---|---|---|---|
 | **P1a** sparsity | linear decoder on the train-selected K units ≥ tuned linear decoder on all units | `logreg_selected_units` vs `logreg_all_units` (both in every run's `baselines`) | paired Δ balanced accuracy (Left/Right and 3-class) | CI of Δ includes −0.02 |
 | **P1b** temporal / non-linear gain | DelayCAST on the selected K ≥ linear decoder on the selected K | `criteria` run vs `logreg_selected_units` | paired Δ balanced accuracy | CI of Δ includes 0 |
-| **P2** not just loud units | criteria > rate-matched K > random K | `criteria` vs `rate` vs `random` runs (same seeds/splits) | paired Δ balanced accuracy, both contrasts | either CI includes 0 |
-| **P3** late-delay sufficiency | τ<sub>95</sub> ≤ 500 ms for the model (bootstrap CI upper bound, full-context accuracy above chance) and for the linear all-unit sweep; occluding the last window of the delay (200 ms) costs more than occluding any earlier window | context sweep, `csi`, `tau95_linear_ms`, `temporal_occlusion` | CI upper bound of τ<sub>95</sub>; paired Δ(last window) − min Δ(earlier windows) | model at chance, upper CI > 500 ms, linear τ<sub>95</sub> > 500 ms, or an earlier window costs as much |
-| **P4** delay → response coupling | forecast deviance explained (model) − (persistence) > 0; units with C over-represented among selected vs eligible-unselected | `forecast` per session; selection tables | paired Δ deviance explained; Fisher exact per session + sign test | CI includes 0 |
+| **P2** not just loud units | criteria > rate-matched K<sub>eff</sub> > random K<sub>eff</sub> (same number of units per session × region) | `criteria` vs `rate` vs `random` runs (same seeds/splits) | paired Δ balanced accuracy, both contrasts | either CI includes 0 |
+| **P3** late-delay sufficiency | τ<sub>95</sub> ≤ 500 ms for the model (bootstrap CI upper bound, full-context accuracy above chance) and for the linear all-unit sweep; masking the last window of the delay (200 ms, zero occlusion = the training-time window dropout) costs more than masking any earlier window | context sweep, `csi`, `tau95_linear_ms`, `temporal_occlusion` | CI upper bound of τ<sub>95</sub>; paired Δ(last window) − min Δ(earlier windows) | model at chance, upper CI > 500 ms, linear τ<sub>95</sub> > 500 ms, or an earlier window costs as much |
+| **P4** delay → response coupling | forecast Poisson deviance explained of the model > 0 (relative to the training-PSTH null); persistence and the class-conditional oracle (mean response PSTH of the true class) reported, with the number of sessions in which the model beats the oracle; units with C over-represented among selected vs eligible-unselected | `forecast` per session; selection tables | per-session deviance explained vs 0; Fisher exact per session + sign test | CI includes 0 |
 | **P5a** ALM dominance for direction | removing ALM input costs more Left/Right accuracy than removing striatal input | `region_ablation` (in-distribution region drop, and permutation) | paired Δ(ALM) − Δ(STR) per session | CI includes 0 |
 | **P5b** striatum and no-lick trials *(exploratory)* | Ignore recall and its Wilson CI; striatal vs ALM Ignore-recall loss under ablation | `confusion`, `region_ablation.recall` | reported, no verdict below 30 Ignore test trials; flagged *confounded* when `logreg_trial_index` decodes Ignore above chance | — |
 | **P6** model importance agrees with criteria | permutation importance and gates correlate with the criteria score within session × region | `importance_agreement` | mean Spearman ρ across cells, sign test | sign test p ≥ 0.05 or mean ρ ≤ 0 |

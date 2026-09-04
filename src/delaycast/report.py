@@ -60,7 +60,7 @@ CLAIM = (
     "size (P2); (ii) the last 500 ms before the go cue retain >= 95 % of full-delay accuracy for both the "
     "selected-unit model and the all-unit linear decoder, and removing the last 400 ms costs more than removing "
     "any earlier 400 ms (P3); (iii) the selected units' late-delay activity forecasts their own response-epoch "
-    "activity beyond a persistence baseline (P4); (iv) removing ALM input degrades Left/Right decoding more "
+    "activity beyond the units' mean response (P4; persistence and the class-conditional oracle reported); (iv) removing ALM input degrades Left/Right decoding more "
     "than removing striatal input (P5a); striatal involvement in no-lick (Ignore) trials is exploratory (P5b); "
     "(v) model-based importance agrees with the model-free criteria (P6); (vi) the causal spectro-temporal "
     "population branch adds accuracy beyond a matched population-rate control (P7); (vii) a backbone trained on "
@@ -229,6 +229,105 @@ def _chance_p95(res: dict) -> float:
     return v
 
 
+def empty_criteria_sessions(runs: dict) -> list[str]:
+    """Sessions in which the criteria run used no unit at all (K_eff = 0 in every region, in any seed).
+
+    Such a session is a *selection failure* (no unit passed the stability rule, e.g. too few trials), not a
+    measurement of what criteria-selected units can do: its criteria-arm accuracy is chance by construction, its
+    occlusion / ablation deltas are exactly zero and its forecast is undefined.  Keeping it in a paired
+    comparison would count the failure as evidence against (or, for null-shaped deltas, for) the prediction, so
+    every criteria-arm comparison excludes it and the report lists it."""
+    out: set[str] = set()
+    for name in ("criteria", "criteria_popmean", "criteria_nospec"):
+        for res in runs.get(name) or []:
+            for s, per in (res.get("n_selected") or {}).items():
+                if isinstance(per, dict) and sum(_int(v) for v in per.values()) == 0:
+                    out.add(str(s))
+    return sorted(out)
+
+
+def k_eff_per_session(runs: dict) -> dict[str, dict[str, float]]:
+    """Mean over seeds of the criteria run's units per region and session."""
+    acc: dict[str, dict[str, list[int]]] = {}
+    for res in runs.get("criteria") or []:
+        for s, per in (res.get("n_selected") or {}).items():
+            if isinstance(per, dict):
+                for r, v in per.items():
+                    acc.setdefault(str(s), {}).setdefault(str(r), []).append(_int(v))
+    return {s: {r: float(np.mean(v)) for r, v in per.items()} for s, per in acc.items()}
+
+
+def _bacc_from_preds(y: np.ndarray, yhat: np.ndarray) -> float:
+    present = np.unique(y)
+    return float(np.mean([np.mean(yhat[y == c] == c) for c in present])) if len(present) else math.nan
+
+
+def _bacc_lr_from_preds(y: np.ndarray, yhat: np.ndarray) -> float:
+    keep = y != 0
+    return _bacc_from_preds(y[keep], yhat[keep]) if keep.any() else math.nan
+
+
+def replication_by_session(arm_a: list[dict] | None, arm_b: list[dict] | None, direction: str, metric: str = "balanced_accuracy",
+                           n_boot: int = N_BOOT, seed: int = 0) -> dict | None:
+    """Trial-level replication of a two-arm comparison *inside* every session.
+
+    Sessions are the unit of replication for the verdict, but with few sessions the session-level test has no
+    power (n = 4: the exact one-sided Wilcoxon cannot go below p = 1/16).  This supplementary statistic asks, per
+    session, whether the difference between the arms holds on that session's own test trials: for every seed the
+    two arms were evaluated on the same test trials (same split), so the per-trial predictions are paired; the
+    trials are resampled ``n_boot`` times, the difference of balanced accuracy is recomputed per seed and averaged
+    over seeds, and the session *replicates* the prediction when the bootstrap CI excludes 0 in the predicted
+    direction (non-inferiority: the CI lower bound exceeds -NOT_LOWER_MARGIN).  It never changes a verdict; it is
+    reported next to it ("replicates in k/n sessions").  Returns None when no run has ``test_predictions.csv``."""
+    if not arm_a or not arm_b:
+        return None
+    stat = _bacc_lr_from_preds if metric == "balanced_accuracy_lr" else _bacc_from_preds
+    by_seed_a = {int(r.get("seed", 0)): r for r in arm_a}
+    by_seed_b = {int(r.get("seed", 0)): r for r in arm_b}
+    per_session: dict[str, list[np.ndarray]] = {}
+    point: dict[str, list[float]] = {}
+    rng = np.random.default_rng(seed)
+    found = False
+    for sd in sorted(set(by_seed_a) & set(by_seed_b)):
+        pa, pb = by_seed_a[sd].get("_run_dir"), by_seed_b[sd].get("_run_dir")
+        if not pa or not pb:
+            continue
+        fa, fb = Path(pa) / "test_predictions.csv", Path(pb) / "test_predictions.csv"
+        if not (fa.is_file() and fb.is_file()):
+            continue
+        da, db = pd.read_csv(fa), pd.read_csv(fb)
+        m = da.merge(db, on=["session", "trial"], suffixes=("_a", "_b"))
+        if not len(m):
+            continue
+        found = True
+        for s, g in m.groupby("session"):
+            y = g["label_a"].to_numpy(int)
+            ya, yb = g["pred_a"].to_numpy(int), g["pred_b"].to_numpy(int)
+            n = len(y)
+            if n < 10:
+                continue
+            idx = rng.integers(0, n, size=(n_boot, n))
+            diffs = np.array([stat(y[i], ya[i]) - stat(y[i], yb[i]) for i in idx])
+            per_session.setdefault(str(s), []).append(diffs)
+            point.setdefault(str(s), []).append(stat(y, ya) - stat(y, yb))
+    if not found:
+        return None
+    rows = {}
+    for s, boots in per_session.items():
+        d = np.nanmean(np.stack(boots), axis=0)          # average the per-seed bootstrap differences
+        lo, hi = float(np.nanpercentile(d, 2.5)), float(np.nanpercentile(d, 97.5))
+        pt = float(np.mean(point[s]))
+        if direction == ">":
+            rep_ = lo > 0
+        elif direction == "<":
+            rep_ = hi < 0
+        else:   # not_lower
+            rep_ = lo > -NOT_LOWER_MARGIN
+        rows[s] = {"diff": pt, "ci": [lo, hi], "replicates": bool(rep_), "n_seeds": len(boots)}
+    return {"per_session": rows, "n_replicating": int(sum(r["replicates"] for r in rows.values())), "n_sessions": len(rows),
+            "metric": metric, "direction": direction}
+
+
 # ----------------------------------------------------------------------------------------------------------
 # the statistical rule (identical for every comparison)
 # ----------------------------------------------------------------------------------------------------------
@@ -302,11 +401,14 @@ def paired_test(diff: np.ndarray, direction: str, n_boot: int = N_BOOT, seed: in
 
 def compare_arms(arm_a: list[dict] | None, arm_b: list[dict] | None, metrics: tuple[str, ...] | str,
                  direction: str, label_a: str, label_b: str, baseline_a: str | None = None,
-                 baseline_b: str | None = None) -> dict:
-    """Full two-arm comparison: per-session table, seed counts, Wilcoxon, bootstrap CI and verdict."""
+                 baseline_b: str | None = None, exclude: list[str] | None = None, replication: bool = False) -> dict:
+    """Full two-arm comparison: per-session table, seed counts, Wilcoxon, bootstrap CI and verdict.
+
+    ``exclude`` removes sessions (empty criteria set) from the pairing; ``replication`` adds the per-session
+    trial-bootstrap statistic (:func:`replication_by_session`) when both arms have per-trial predictions."""
     out: dict[str, Any] = {"arm_a": label_a, "arm_b": label_b, "direction": direction, "table": [],
                            "n_seeds_a": len(_seeds(arm_a)), "n_seeds_b": len(_seeds(arm_b)),
-                           "n_seeds": min(len(_seeds(arm_a)), len(_seeds(arm_b)))}
+                           "n_seeds": min(len(_seeds(arm_a)), len(_seeds(arm_b))), "excluded_sessions": list(exclude or [])}
     va, ma = per_session_values(arm_a, metrics, baseline_a)
     vb, mb = per_session_values(arm_b, metrics, baseline_b)
     # both arms must be read on the same metric; fall back together if either lacks the preferred one
@@ -323,7 +425,7 @@ def compare_arms(arm_a: list[dict] | None, arm_b: list[dict] | None, metrics: tu
                     "p": math.nan, "passes": False, "failure_condition": "required run missing",
                     "missing": missing or [f"no common metric among {metrics}"]})
         return out
-    sessions = sorted(set(va) & set(vb))
+    sessions = sorted((set(va) & set(vb)) - set(exclude or []))
     rows = []
     for s in sessions:
         a, b = float(np.mean(va[s])), float(np.mean(vb[s]))
@@ -332,6 +434,13 @@ def compare_arms(arm_a: list[dict] | None, arm_b: list[dict] | None, metrics: tu
     out.update(paired_test(np.array([r["diff"] for r in rows]), direction))
     out["mean_a"] = _mean([r["a"] for r in rows])
     out["mean_b"] = _mean([r["b"] for r in rows])
+    if replication and not baseline_a and not baseline_b:
+        rp = replication_by_session(arm_a, arm_b, direction, metric=out["metric"] or "balanced_accuracy")
+        if rp is not None:
+            rp["per_session"] = {s: v for s, v in rp["per_session"].items() if s not in set(exclude or [])}
+            rp["n_replicating"] = int(sum(v["replicates"] for v in rp["per_session"].values()))
+            rp["n_sessions"] = len(rp["per_session"])
+            out["replication"] = rp
     return out
 
 
@@ -348,6 +457,13 @@ def _combine(parts: dict[str, str]) -> str:
     if "not testable" in vs:
         return "not testable"
     return "supported"
+
+
+def _replication_line(c: dict | None) -> str:
+    rp = (c or {}).get("replication")
+    if not rp or not rp.get("n_sessions"):
+        return ""
+    return f"; replicates in {rp['n_replicating']}/{rp['n_sessions']} sessions (trial bootstrap)"
 
 
 def _summary_line(c: dict) -> str:
@@ -396,11 +512,12 @@ def _p0(runs: dict) -> dict:
 
 def _p1(runs: dict) -> tuple[dict, dict]:
     crit = runs.get("criteria")
+    excl = empty_criteria_sessions(runs)
     metrics = ("balanced_accuracy_lr", "balanced_accuracy")
     a = compare_arms(crit, crit, metrics, "not_lower", "logreg_selected_units", "logreg_all_units",
-                     baseline_a="logreg_selected_units", baseline_b="logreg_all_units")
+                     baseline_a="logreg_selected_units", baseline_b="logreg_all_units", exclude=excl)
     b = compare_arms(crit, crit, metrics, "not_lower", "criteria (DelayCAST)", "logreg_selected_units",
-                     baseline_b="logreg_selected_units")
+                     baseline_b="logreg_selected_units", exclude=excl)
     p1a = {"id": "P1a", "title": "Linear decoder on selected K not lower than linear on all units",
            "comparator": "baseline logreg_selected_units vs logreg_all_units (criteria run)",
            "statistic": f"paired {a.get('metric') or 'balanced_accuracy_lr'} difference, non-inferiority margin {NOT_LOWER_MARGIN}",
@@ -414,13 +531,14 @@ def _p1(runs: dict) -> tuple[dict, dict]:
 
 def _p2(runs: dict) -> dict:
     crit = runs.get("criteria")
-    parts = {name: compare_arms(crit, runs.get(name), "balanced_accuracy", ">", "criteria", name)
+    excl = empty_criteria_sessions(runs)
+    parts = {name: compare_arms(crit, runs.get(name), "balanced_accuracy", ">", "criteria", name, exclude=excl, replication=True)
              for name in ("rate", "random")}
     verdict = "not run" if not crit else _combine({k: v["verdict"] for k, v in parts.items()})
     return {"id": "P2", "title": "Criteria subset above rate-matched and random subsets",
             "comparator": "criteria vs rate; criteria vs random", "statistic": "paired balanced_accuracy difference > 0 (both)",
             "failure_condition": "either comparison with p >= 0.05 or CI lower bound <= 0", "comparisons": parts,
-            "verdict": verdict, "result": " || ".join(f"vs {k}: {_summary_line(v)} -> {v['verdict']}" for k, v in parts.items())}
+            "verdict": verdict, "result": " || ".join(f"vs {k}: {_summary_line(v)}{_replication_line(v)} -> {v['verdict']}" for k, v in parts.items())}
 
 
 def _p3(runs: dict) -> dict:
@@ -481,10 +599,12 @@ def _p3(runs: dict) -> dict:
             if lv and ev:
                 last.setdefault(s, []).append(float(np.mean(lv)))
                 earlier.setdefault(s, []).append(float(np.min(ev)))      # the worst earlier window
+    excl = set(empty_criteria_sessions(runs))
     rows = [{"session": s, "a": float(np.mean(last[s])), "b": float(np.mean(earlier[s])),
-             "diff": float(np.mean(last[s]) - np.mean(earlier[s]))} for s in sorted(set(last) & set(earlier))]
+             "diff": float(np.mean(last[s]) - np.mean(earlier[s]))} for s in sorted((set(last) & set(earlier)) - excl)]
     comp: dict[str, Any] = {"arm_a": "delta(last window)", "arm_b": "min delta(earlier windows)", "metric": "delta_balanced_accuracy",
-                            "table": rows, "n_seeds": len(crit), "n_seeds_a": len(crit), "n_seeds_b": len(crit)}
+                            "table": rows, "n_seeds": len(crit), "n_seeds_a": len(crit), "n_seeds_b": len(crit),
+                            "excluded_sessions": sorted(excl)}
     if rows:
         comp.update(paired_test(np.array([r["diff"] for r in rows]), "<"))
         comp["mean_a"], comp["mean_b"] = _mean([r["a"] for r in rows]), _mean([r["b"] for r in rows])
@@ -559,37 +679,55 @@ def _as_bool(s: pd.Series) -> pd.Series:
 
 
 def _p4(runs: dict) -> dict:
-    """Forecast beyond persistence: per session the mean over regions of deviance_explained(model) minus
-    deviance_explained(persistence).  Regions without data (no units) are skipped, not counted as zero."""
+    """Forecast beyond the unit's own mean response: per session the mean over regions of the model's Poisson
+    deviance explained relative to the training-PSTH null (0 = the null itself), tested against 0 across sessions.
+
+    Two reference points are reported next to it, neither is the comparator: the *persistence* forecast (the
+    late-delay rate carried into the response epoch; on real data it is far below the null because response rates
+    differ from delay rates, so "beyond persistence" would be trivially true) and the *class-conditional oracle*
+    (the mean response PSTH of the true class; a model above it forecasts trial-specific structure beyond the
+    class identity).  Regions without data (no units) are skipped, not counted as zero."""
     crit = runs.get("criteria")
-    out: dict[str, Any] = {"id": "P4", "title": "Late-delay activity forecasts response-epoch activity beyond persistence",
-                           "comparator": "criteria forecast deviance explained: model vs persistence (mean over regions)",
-                           "statistic": "paired per-session difference > 0", "failure_condition": "p >= 0.05 or CI lower bound <= 0"}
+    out: dict[str, Any] = {"id": "P4", "title": "Late-delay activity forecasts response-epoch activity beyond the mean response",
+                           "comparator": "criteria forecast: Poisson deviance explained of the model vs the training-PSTH null (0), mean over regions; persistence and class-conditional oracle reported",
+                           "statistic": "per-session deviance explained > 0", "failure_condition": "p >= 0.05 or CI lower bound <= 0"}
     if not crit:
         out.update({"verdict": "not run", "result": "missing: criteria", "comparison": {"verdict": "not run"}})
         return out
+    excl = set(empty_criteria_sessions(runs))
     model: dict[str, list[float]] = {}
     pers: dict[str, list[float]] = {}
+    oracle: dict[str, list[float]] = {}
     for res in crit:
         for row in (res.get("forecast") or {}).get("per_session") or []:
-            if not isinstance(row, dict) or "session" not in row:
+            if not isinstance(row, dict) or "session" not in row or str(row["session"]) in excl:
                 continue
-            m, p = [], []
+            m, p, o = [], [], []
             for r in REGIONS:
-                a, b = _finite(row.get(f"deviance_explained_{r}")), _finite(row.get(f"deviance_explained_persistence_{r}"))
-                if not (math.isnan(a) or math.isnan(b)):
-                    m.append(a)
-                    p.append(b)
+                a = _finite(row.get(f"deviance_explained_{r}"))
+                if math.isnan(a):
+                    continue
+                m.append(a)
+                p.append(_finite(row.get(f"deviance_explained_persistence_{r}")))
+                o.append(_finite(row.get(f"deviance_explained_classmean_{r}")))
             if m:
                 model.setdefault(str(row["session"]), []).append(float(np.mean(m)))
-                pers.setdefault(str(row["session"]), []).append(float(np.mean(p)))
-    rows = [{"session": s, "a": float(np.mean(model[s])), "b": float(np.mean(pers[s])), "diff": float(np.mean(model[s]) - np.mean(pers[s]))}
-            for s in sorted(set(model) & set(pers))]
-    comp: dict[str, Any] = {"arm_a": "model deviance explained", "arm_b": "persistence deviance explained", "metric": "deviance_explained (mean over regions)",
-                            "table": rows, "n_seeds": len(crit), "n_seeds_a": len(crit), "n_seeds_b": len(crit)}
+                pers.setdefault(str(row["session"]), []).append(float(np.nanmean(p)) if np.isfinite(p).any() else math.nan)
+                oracle.setdefault(str(row["session"]), []).append(float(np.nanmean(o)) if np.isfinite(o).any() else math.nan)
+    rows = [{"session": s, "a": float(np.mean(model[s])), "b": 0.0, "diff": float(np.mean(model[s])),
+             "persistence": float(np.nanmean(pers[s])) if np.isfinite(pers[s]).any() else math.nan,
+             "class_oracle": float(np.nanmean(oracle[s])) if np.isfinite(oracle[s]).any() else math.nan}
+            for s in sorted(model)]
+    comp: dict[str, Any] = {"arm_a": "model deviance explained", "arm_b": "training-PSTH null (0)", "metric": "deviance_explained (mean over regions)",
+                            "table": rows, "n_seeds": len(crit), "n_seeds_a": len(crit), "n_seeds_b": len(crit), "excluded_sessions": sorted(excl)}
     if rows:
         comp.update(paired_test(np.array([r["diff"] for r in rows]), ">"))
-        comp["mean_a"], comp["mean_b"] = _mean([r["a"] for r in rows]), _mean([r["b"] for r in rows])
+        comp["mean_a"], comp["mean_b"] = _mean([r["a"] for r in rows]), 0.0
+        comp["mean_persistence"] = _mean([r["persistence"] for r in rows if not math.isnan(r["persistence"])])
+        comp["mean_class_oracle"] = _mean([r["class_oracle"] for r in rows if not math.isnan(r["class_oracle"])])
+        above_oracle = [r["a"] > r["class_oracle"] for r in rows if not math.isnan(r["class_oracle"])]
+        comp["n_sessions_above_class_oracle"] = int(sum(above_oracle))
+        comp["n_sessions_with_class_oracle"] = len(above_oracle)
     else:
         comp.update({"verdict": "not run", "missing": ["forecast per_session"], "n_sessions": 0, "mean_diff": math.nan,
                      "ci": [math.nan, math.nan], "p": math.nan, "passes": False})
@@ -597,7 +735,11 @@ def _p4(runs: dict) -> dict:
     out["coupling_enrichment"] = _coupling_enrichment(crit)
     out["verdict"] = comp["verdict"]
     ce = out["coupling_enrichment"]
-    out["result"] = (f"{_summary_line(comp)}; coupled fraction selected={_fmt(ce['mean_frac_selected'])} vs "
+    extra = ""
+    if rows:
+        extra = (f"; persistence={_fmt(comp.get('mean_persistence'))}, class-conditional oracle={_fmt(comp.get('mean_class_oracle'))} "
+                 f"(model above oracle in {comp.get('n_sessions_above_class_oracle', 0)}/{comp.get('n_sessions_with_class_oracle', 0)} sessions)")
+    out["result"] = (f"{_summary_line(comp)}{extra}; coupled fraction selected={_fmt(ce['mean_frac_selected'])} vs "
                      f"unselected={_fmt(ce['mean_frac_unselected'])} sign-test p={_fmt_p(ce['sign_test_p'])}")
     return out
 
@@ -641,10 +783,12 @@ def _p5a(runs: dict) -> dict:
             if da and ds:
                 alm.setdefault(s, []).append(float(np.mean(da)))
                 strn.setdefault(s, []).append(float(np.mean(ds)))
+    excl = set(empty_criteria_sessions(runs))
     rows = [{"session": s, "a": float(np.mean(alm[s])), "b": float(np.mean(strn[s])), "diff": float(np.mean(alm[s]) - np.mean(strn[s]))}
-            for s in sorted(set(alm) & set(strn))]
+            for s in sorted((set(alm) & set(strn)) - excl)]
     comp: dict[str, Any] = {"arm_a": "mean delta (ALM removed)", "arm_b": "mean delta (STR removed)", "metric": f"delta_balanced_accuracy ({method_used})",
-                            "table": rows, "n_seeds": len(crit), "n_seeds_a": len(crit), "n_seeds_b": len(crit), "method": method_used}
+                            "table": rows, "n_seeds": len(crit), "n_seeds_a": len(crit), "n_seeds_b": len(crit), "method": method_used,
+                            "excluded_sessions": sorted(excl)}
     if rows:
         comp.update(paired_test(np.array([r["diff"] for r in rows]), "<"))
         comp["mean_a"], comp["mean_b"] = _mean([r["a"] for r in rows]), _mean([r["b"] for r in rows])
@@ -744,10 +888,11 @@ def _p6(runs: dict) -> dict:
 def _p7(runs: dict) -> dict:
     crit = runs.get("criteria")
     other = "criteria_popmean" if runs.get("criteria_popmean") else ("criteria_nospec" if runs.get("criteria_nospec") else "criteria_popmean")
-    comp = compare_arms(crit, runs.get(other), "balanced_accuracy", ">", "criteria", other)
+    comp = compare_arms(crit, runs.get(other), "balanced_accuracy", ">", "criteria", other, exclude=empty_criteria_sessions(runs), replication=True)
     return {"id": "P7", "title": "Spectro-temporal population branch adds accuracy beyond the population-rate control",
             "comparator": f"criteria vs {other}", "statistic": "paired balanced_accuracy difference > 0",
-            "failure_condition": comp["failure_condition"], "comparison": comp, "verdict": comp["verdict"], "result": _summary_line(comp)}
+            "failure_condition": comp["failure_condition"], "comparison": comp, "verdict": comp["verdict"],
+            "result": _summary_line(comp) + _replication_line(comp)}
 
 
 def _p8(runs: dict) -> dict:
@@ -819,7 +964,8 @@ def _header(runs: dict, summary: pd.DataFrame | None) -> dict:
     return {"n_sessions": len(sessions), "sessions": sessions, "n_sessions_by_dataset": {k: len(v) for k, v in by_ds.items()},
             "other_sessions": other, "animals": animals, "n_animals": {k: len(v) for k, v in animals.items()},
             "seeds": seeds, "runs": table, "test_trials_per_class": per_class,
-            "test_trials_source": (ref[0].get("_name") if ref else None)}
+            "test_trials_source": (ref[0].get("_name") if ref else None),
+            "empty_criteria_sessions": empty_criteria_sessions(runs), "k_eff_per_session": k_eff_per_session(runs)}
 
 
 def _selection_summary(out_dir: Path, runs: dict) -> dict:
@@ -908,8 +1054,24 @@ def _comparison_md(c: dict, label_a: str | None = None, label_b: str | None = No
     if not c or c.get("verdict") == "not run":
         return f"_not run_ (missing: {', '.join((c or {}).get('missing') or ['required run'])})\n"
     la, lb = label_a or c.get("arm_a", "A"), label_b or c.get("arm_b", "B")
-    rows = [[r["session"], _fmt(r["a"]), _fmt(r["b"]), _fmt(r["diff"])] for r in c.get("table", [])]
-    txt = _md_table(["session", la, lb, "difference (A - B)"], rows)
+    rp = (c.get("replication") or {}).get("per_session") or {}
+    has_oracle = any("class_oracle" in r for r in c.get("table", []))
+    rows = []
+    for r in c.get("table", []):
+        row = [r["session"], _fmt(r["a"]), _fmt(r["b"]), _fmt(r["diff"])]
+        if has_oracle:
+            row += [_fmt(r.get("persistence")), _fmt(r.get("class_oracle"))]
+        if rp:
+            v = rp.get(r["session"])
+            row.append(f"{_fmt_ci(v['ci'])} {'yes' if v['replicates'] else 'no'}" if v else "n/a")
+        rows.append(row)
+    headers = ["session", la, lb, "difference (A - B)"] + (["persistence", "class-conditional oracle"] if has_oracle else []) \
+        + (["trial-bootstrap CI (replicates?)"] if rp else [])
+    txt = _md_table(headers, rows)
+    if c.get("excluded_sessions"):
+        txt += f"\nexcluded (empty criteria set): {', '.join(c['excluded_sessions'])}\n"
+    if c.get("replication"):
+        txt += f"\nreplicates in {c['replication']['n_replicating']}/{c['replication']['n_sessions']} sessions (trial bootstrap, metric `{c['replication']['metric']}`)\n"
     txt += (f"\nmetric: `{c.get('metric')}` | mean A = {_fmt(c.get('mean_a'))}, mean B = {_fmt(c.get('mean_b'))}, "
             f"mean difference = {_fmt(c.get('mean_diff'))} | n_sessions = {c.get('n_sessions')} | n_seeds = {c.get('n_seeds')} "
             f"(A {c.get('n_seeds_a')}, B {c.get('n_seeds_b')}) | Wilcoxon p = {_fmt_p(c.get('p'))} "
@@ -940,12 +1102,23 @@ def render_markdown(report: dict) -> str:
     L.append(_md_table(["run", "seeds", "n_sessions", "balanced acc.", "bal. acc. L/R", "chance p95", "n test trials"],
                        [[r["run"], ", ".join(str(s) for s in r["seeds"]), r["n_sessions"], _fmt(r["balanced_accuracy"]), _fmt(r["balanced_accuracy_lr"]),
                          _fmt(r["chance_p95"]), _fmt(r["n_test_trials"], 0)] for r in h["runs"]]))
+    keff = h.get("k_eff_per_session") or {}
+    if keff:
+        L.append("\nunits used by the criteria run (K_eff per region, mean over seeds):\n")
+        L.append(_md_table(["session"] + list(REGIONS) + ["total"],
+                           [[s] + [_fmt(v.get(r), 1) for r in REGIONS] + [_fmt(sum(v.get(r, 0.0) for r in REGIONS), 1)] for s, v in sorted(keff.items())]))
+    if h.get("empty_criteria_sessions"):
+        L.append(f"\n**Sessions with an empty criteria set** (no unit passed the stability rule; excluded from every criteria-arm "
+                 f"comparison below, listed here instead): {', '.join(h['empty_criteria_sessions'])}\n")
     L.append("\n## 2. The claim and the verdicts\n")
     L.append(f"> {report['claim']}\n")
     L.append(f"Statistical rule: per-session paired differences (mean over seeds per session first), Wilcoxon signed-rank across sessions "
              f"(exact for n <= 25), {N_BOOT}-resample session bootstrap CI of the mean difference. 'supported' needs p < {ALPHA} AND a CI "
              f"excluding 0 in the predicted direction (non-inferiority claims: CI lower bound > -{NOT_LOWER_MARGIN}); 'inconclusive' when "
-             f">= {MIN_SESSIONS} sessions but the rule fails; 'not testable' when < {MIN_SESSIONS} sessions; 'not run' when a run is missing.\n")
+             f">= {MIN_SESSIONS} sessions but the rule fails; 'not testable' when < {MIN_SESSIONS} sessions; 'not run' when a run is missing. "
+             f"Where both arms have per-trial predictions, 'replicates in k/n sessions' counts the sessions whose own trial-bootstrap "
+             f"({N_BOOT} resamples of matched test trials, averaged over seeds) CI excludes 0 in the predicted direction - supplementary "
+             f"evidence that never changes a verdict. Sessions with an empty criteria set are excluded from criteria-arm comparisons.\n")
     L.append(_md_table(["prediction", "comparator", "statistic", "failure condition", "result numbers", "verdict"],
                        [[f"{pid}: {p['title']}", p["comparator"], p["statistic"], p["failure_condition"], p["result"], f"**{p['verdict']}**"]
                         for pid, p in preds.items()]))
@@ -969,7 +1142,7 @@ def render_markdown(report: dict) -> str:
             L.append(_comparison_md(p.get("comparison"), "delta last window", "mean delta earlier windows"))
             L.append("\n**(iii) linear decoder tau95 (reported)**: " + ", ".join(f"seed{r['seed']} = {_fmt(r['tau95_linear_ms'], 0)} ms" for r in p.get("linear_tau95_per_seed", [])) + "\n")
         elif pid == "P4":
-            L.append(_comparison_md(p.get("comparison"), "model dev. expl.", "persistence dev. expl."))
+            L.append(_comparison_md(p.get("comparison"), "model dev. expl.", "null (0)"))
             ce = p.get("coupling_enrichment") or {}
             if ce.get("table"):
                 L.append("\n**Coupling (C) enrichment among selected units (reported)**\n\n" + _md_table(

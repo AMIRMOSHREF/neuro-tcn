@@ -446,7 +446,14 @@ def _flag_and_score(df: pd.DataFrame, cfg) -> pd.DataFrame:
     df["score"] = np.where(df.pass_floor, score, -np.inf)
     is_lf = bool(df["label_free"].iloc[0]) if ("label_free" in df and len(df)) else False
     min_crit = int(sel.get_path("min_criteria_label_free", 1)) if is_lf else int(sel.min_criteria)
-    df["eligible"] = df.pass_floor & (df.n_criteria >= min_crit)
+    # At least one of the criteria must be about the upcoming lick direction (S: rate selectivity, W: spectral
+    # selectivity).  C and R are label-free (a unit that ramps and couples on every trial passes both under any
+    # label permutation), so without this a "criteria" set can be assembled from units that carry no direction
+    # information at all - which is exactly what a rate-matched control set is.  Held-out (label-free) selection
+    # cannot apply it and does not claim to.
+    df["c_direction"] = df["c_selectivity"].to_numpy(bool) | df["c_spectral"].to_numpy(bool)
+    require_dir = bool(sel.get_path("require_label_criterion", True)) and not is_lf
+    df["eligible"] = df.pass_floor & (df.n_criteria >= min_crit) & (df.c_direction if require_dir else True)
     return df
 
 
@@ -681,10 +688,16 @@ def _reasons(row: pd.Series, cfg) -> str:
         elif row.eligible:
             parts.append(f"eligible and stable ({stab}) but ranked below K={k}")
         else:
-            parts.append(f"not eligible: {n_crit} of >= {int(sel.min_criteria)} criteria")
+            parts.append(_not_eligible_text(row, sel, n_crit))
     elif not row.eligible:
-        parts.append(f"not eligible: {n_crit} of >= {int(sel.min_criteria)} criteria")
+        parts.append(_not_eligible_text(row, sel, n_crit))
     return " | ".join(parts)
+
+
+def _not_eligible_text(row: pd.Series, sel, n_crit: int) -> str:
+    if n_crit >= int(sel.min_criteria) and not bool(row.get("c_direction", True)) and not bool(row.get("label_free", False)):
+        return f"not eligible: {n_crit} criteria but none about lick direction (needs S or W)"
+    return f"not eligible: {n_crit} of >= {int(sel.min_criteria)} criteria"
 
 
 def selection_summary(results: list[SelectionResult]) -> pd.DataFrame:

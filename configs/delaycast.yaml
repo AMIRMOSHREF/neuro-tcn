@@ -63,7 +63,9 @@ selection:
     coupling: 1.0
     spectral: 0.75
     ramp: 0.5
-  min_criteria: 2             # unit must satisfy at least this many of S, C, W, R to be eligible
+  min_criteria: 2             # unit must satisfy at least this many of S, C, W, R to be eligible ...
+  require_label_criterion: true   # ... including at least one about lick direction (S or W); C and R are label-free
+  match_k_to_criteria: true   # rate / random control arms use the criteria set's K_eff per session x region (same size)
   n_subsamples: 50            # stability selection: stratified half-subsamples of the fit trials (0 = off)
   subsample_frac: 0.5         # fraction of trials per subsample (without replacement)
   min_stability: 0.6          # selection frequency needed to count as "stable" (> 0.5 for the false-selection bound)
@@ -121,7 +123,7 @@ evaluate:
   context_sweep_ms: [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200]
   n_shuffles: 1000              # within-session label permutations for the chance level (predictions fixed)
   n_bootstrap: 1000             # trial resamples (stratified by session x class) for CIs and the CSI
-  occlusion: permute            # permute (slice replaced by another test trial of the same session) | zero
+  occlusion: zero               # zero (window masked, in-distribution: matches train.window_dropout) | permute (slice of another trial)
   occlusion_window_ms: 200      # window length of the temporal occlusion map
   occlusion_step_ms: 100
   csi_fraction: 0.95            # tau95 = shortest context keeping >= 95 % of full-context accuracy (isotonic fit)

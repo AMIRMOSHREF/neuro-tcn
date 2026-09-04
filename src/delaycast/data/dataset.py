@@ -30,31 +30,37 @@ class SessionTensors:
 
 
 def choose_indices(sel: SelectionResult | None, cache: SessionCache, cfg, mode: str, rng: np.random.Generator,
-                   trial_idx: np.ndarray | None = None) -> dict[str, np.ndarray]:
-    """``criteria`` (default), ``rate`` (top-K most active on the fit trials, no selectivity) or ``random`` (K random units)."""
+                   trial_idx: np.ndarray | None = None, k_per_region: dict[str, int] | None = None) -> dict[str, np.ndarray]:
+    """``criteria`` (default), ``rate`` (the most active units on the fit trials, no selectivity) or ``random``.
+
+    ``k_per_region`` sets how many units the ``rate`` / ``random`` sets take per region: the claim compares the
+    criteria set with rate-matched and random subsets *of the same size*, so the control arms are matched to the
+    number of units the criteria selection actually produced in that session and region (K_eff <= K), not to K.
+    """
     k = int(cfg.selection.top_k_per_region)
     out = {}
     idx = np.arange(cache.n_trials) if trial_idx is None else np.asarray(trial_idx, dtype=int)
     for r in REGIONS:
         n = cache.context[r].shape[1]
+        kr = k if k_per_region is None else min(k, max(0, int(k_per_region.get(r, k))))
         if mode == "criteria":
             if sel is None:
                 raise ValueError("mode='criteria' needs a SelectionResult")
             out[r] = np.asarray(sel.selected[r][:k], dtype=int)
         elif mode == "rate":
             rates = cache.context[r][idx].sum(axis=(0, 2))
-            out[r] = np.argsort(-rates, kind="mergesort")[:k]
+            out[r] = np.argsort(-rates, kind="mergesort")[:kr]
         elif mode == "random":
-            out[r] = rng.permutation(n)[:k]
+            out[r] = rng.permutation(n)[:kr]
         else:
             raise ValueError(mode)
     return out
 
 
 def build_session_tensors(cache: SessionCache, sel: SelectionResult | None, cfg, mode: str = "criteria", seed: int = 0,
-                          trial_idx: np.ndarray | None = None) -> SessionTensors:
+                          trial_idx: np.ndarray | None = None, k_per_region: dict[str, int] | None = None) -> SessionTensors:
     rng = np.random.default_rng(seed)
-    idx = choose_indices(sel, cache, cfg, mode, rng, trial_idx)
+    idx = choose_indices(sel, cache, cfg, mode, rng, trial_idx, k_per_region=k_per_region)
     return tensors_from_indices(cache, idx, cfg)
 
 

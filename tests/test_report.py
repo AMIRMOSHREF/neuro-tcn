@@ -65,11 +65,14 @@ def make_results(bacc: list[float], mode: str, *, chance_p95: float = 0.42, nega
     for i, s in enumerate(SESSIONS):
         row = {"session": s}
         for r in REGIONS:
-            row[f"deviance_explained_{r}"] = -0.05 - 0.01 * i
+            row[f"deviance_explained_{r}"] = 0.05 + 0.01 * i
             row[f"deviance_explained_persistence_{r}"] = -0.50 - 0.02 * i
+            row[f"deviance_explained_classmean_{r}"] = 0.03 + 0.01 * i
         fc_rows.append(row)
-    res["forecast"] = {**{f"deviance_explained_{r}": -0.07 for r in REGIONS},
-                       **{f"deviance_explained_persistence_{r}": -0.55 for r in REGIONS}, "per_session": fc_rows}
+    res["forecast"] = {**{f"deviance_explained_{r}": 0.07 for r in REGIONS},
+                       **{f"deviance_explained_persistence_{r}": -0.55 for r in REGIONS},
+                       **{f"deviance_explained_classmean_{r}": 0.05 for r in REGIONS}, "per_session": fc_rows}
+    res["n_selected"] = {s: {r: 3 for r in REGIONS} for s in SESSIONS}
     res["csi"] = {"tau95_ms": 300.0, "tau95_median_ms": 300.0, "tau95_ci_ms": [200.0, 400.0], "tau95_logloss_ms": 300.0,
                   "tau95_logloss_ci_ms": [200.0, 500.0], "fraction": 0.95, "n_bootstrap": 100}
     res["tau95_linear_ms"] = 300.0
@@ -277,3 +280,53 @@ def test_compare_arms_seed_mean_and_missing_arm():
             row.pop("balanced_accuracy_lr")
     c = compare_arms(a, b, ("balanced_accuracy_lr", "balanced_accuracy"), ">", "criteria", "rate")
     assert c["metric"] == "balanced_accuracy" and c["verdict"] == "supported"
+
+
+def _write_predictions(run_dir: Path, acc_by_session: dict[str, float], n: int = 60, seed: int = 0) -> None:
+    """test_predictions.csv with a given per-session accuracy (Left/Right trials only)."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    for s, acc in acc_by_session.items():
+        for t in range(n):
+            y = 1 + (t % 2)
+            correct = rng.random() < acc
+            rows.append({"session": s, "trial": t, "label": y, "pred": y if correct else (3 - y), "p_Ignore": 0.1, "p_Left": 0.45, "p_Right": 0.45})
+    pd.DataFrame(rows).to_csv(run_dir / "test_predictions.csv", index=False)
+
+
+def test_report_excludes_empty_criteria_sessions_and_counts_replication(cfg, tmp_path):
+    """A session whose criteria set is empty is excluded from every criteria-arm pairing (and listed); sessions
+    with per-trial predictions get a trial-bootstrap replication count next to the session-level verdict."""
+    out = tmp_path / "out"
+    crit = make_results(CRIT, "criteria", full=True)
+    crit["n_selected"][SESSIONS[0]] = {r: 0 for r in REGIONS}       # empty criteria set in the first session
+    crit["per_session"][0]["balanced_accuracy"] = 1 / 3              # ... which therefore sits at chance
+    d_crit = _write_run(out, "within", "criteria", crit, with_selection=True)
+    d_rate = _write_run(out, "within", "rate", make_results(RATE_LOW, "rate"))
+    _write_run(out, "within", "random", make_results(RANDOM, "random"))
+    _write_summary(out, 0.4)
+    acc_c = {s: 0.95 for s in SESSIONS}
+    acc_r = {s: 0.55 for s in SESSIONS}
+    acc_r[SESSIONS[2]] = 0.93                                        # one session where rate is as good -> no replication
+    _write_predictions(d_crit, acc_c, seed=1)
+    _write_predictions(d_rate, acc_r, seed=2)
+    md, rep, text = _run_report(cfg, out)
+    h = rep["header"]
+    assert h["empty_criteria_sessions"] == [SESSIONS[0]]
+    assert h["k_eff_per_session"][SESSIONS[1]] == {r: 3.0 for r in REGIONS}
+    c = rep["predictions"]["P2"]["comparisons"]["rate"]
+    assert c["excluded_sessions"] == [SESSIONS[0]] and [r["session"] for r in c["table"]] == sorted(SESSIONS[1:])
+    assert c["n_sessions"] == 5 and c["verdict"] == "supported"
+    rp = c["replication"]
+    assert rp["n_sessions"] == 5 and SESSIONS[0] not in rp["per_session"]
+    assert rp["per_session"][SESSIONS[2]]["replicates"] is False and rp["per_session"][SESSIONS[1]]["replicates"] is True
+    assert rp["n_replicating"] == 4
+    assert "replicates in 4/5 sessions" in text and "empty criteria set" in text
+    # P4: model deviance explained > 0 with persistence and the class oracle reported, first session excluded
+    p4 = rep["predictions"]["P4"]["comparison"]
+    assert [r["session"] for r in p4["table"]] == sorted(SESSIONS[1:]) and p4["verdict"] == "supported"
+    assert p4["n_sessions_above_class_oracle"] == 5 and p4["mean_persistence"] < 0
+    assert "class-conditional oracle" in text
+    # P3 (ii) and P5a pair only the sessions with units
+    assert [r["session"] for r in rep["predictions"]["P3"]["comparison"]["table"]] == sorted(SESSIONS[1:])
+    assert [r["session"] for r in rep["predictions"]["P5a"]["comparison"]["table"]] == sorted(SESSIONS[1:])

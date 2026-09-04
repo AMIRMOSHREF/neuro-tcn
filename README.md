@@ -153,6 +153,25 @@ The synthetic tree mirrors both layouts and NPZ schemas; example figures made fr
 | `figures/fig2_…`, `fig3_attention.png`, `fig4_results.png` | time–frequency, attention + occlusion + importance agreement, results |
 | `REPORT.md`, `report.json` | verdict per prediction with numbers, CIs, n sessions |
 
+## Protocol revisions after the first real-data run
+
+The first report on the four `Data` sessions changed four rules; every one is documented in
+[`paper/CLAIMS.md`](paper/CLAIMS.md) and the methodology, and all of them require re-running `select` and every
+`train` arm (`.\scripts\run_delaycast.ps1` does the whole protocol):
+
+* **eligibility needs a direction criterion** (`selection.require_label_criterion`): ≥ 2 of {S, C, W, R} *including* S
+  or W. C and R are label-free, so the old rule let the label-permuted stability null reach 0.88;
+* **control arms of the same size** (`selection.match_k_to_criteria`): `rate` / `random` take K<sub>eff</sub> units per
+  session × region, the number the criteria selection produced, not K;
+* **temporal occlusion masks the window** (`evaluate.occlusion: zero`), the same intervention as the training-time
+  window dropout; the permutation variant stays available;
+* **P4 is tested against the units' mean response** (deviance explained > 0); persistence and the class-conditional
+  oracle are reported next to it.
+
+The report also excludes sessions with an empty criteria set from criteria-arm comparisons (listed in its header,
+with K<sub>eff</sub> per session) and prints, per comparison, in how many sessions the prediction replicates on the
+session's own test trials.
+
 ## The figure (what the gold-coloured rows mean)
 
 Figure 1 shows every recorded unit of the four regions on one real trial (rows sorted by selection status with a
