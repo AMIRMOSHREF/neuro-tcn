@@ -299,3 +299,24 @@ def test_within_class_rank_corr_ignores_class_means_and_detects_coupling():
     # columns that are constant within every class are untestable (NaN), never significant
     rho3, p3 = within_class_rank_corr(np.ones((n, 1)), y2[:, None], labels, n_perm=50)
     assert np.isnan(rho3[0]) and np.isnan(p3[0])
+
+
+# ----------------------------------------------------------------------------- held-out sessions never see their test trials
+def test_holdout_label_free_selection_uses_adapt_trials_only(cfg):
+    """Cross-session / cross-dataset runs select the held-out session's units label-free on its ADAPT trials only."""
+    from delaycast.train import fit_trials, make_splits, prepare_sessions
+    caches = {"A/S1": make_cache(11), "B/S2": make_cache(12)}
+    for c, s in zip(caches.values(), caches):
+        c.session = s
+    cfg2 = cfg
+    cfg2.set_path("data.cache_dir", str(cfg.data.cache_dir) if cfg.data.get_path("cache_dir") else "cache_test")
+    splits = make_splits(cfg2, caches, holdout=["B/S2"], seed=0)
+    sels, tensors = prepare_sessions(cfg2, caches, mode="criteria", splits=splits, seed=0, holdout=["B/S2"])
+    sel = dict(zip(caches, sels))["B/S2"]
+    adapt = set(splits["B/S2"]["adapt"].tolist())
+    test = set(splits["B/S2"]["test"].tolist())
+    assert bool(sel.table.label_free.all())
+    assert set(sel.trial_idx.tolist()) == adapt
+    assert not (set(sel.trial_idx.tolist()) & test)
+    assert int(sel.table.n_fit_trials.iloc[0]) == len(adapt)
+    assert len(fit_trials(splits["B/S2"])) == len(adapt)

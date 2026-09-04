@@ -418,7 +418,9 @@ def _criteria_table(feats: dict[str, RegionFeatures], cache: SessionCache, label
     fl = df.pass_floor.to_numpy()
     for k in ("selectivity", "coupling", "spectral", "ramp", "ignore") + (("locus",) if (full and not label_free) else ()):
         p = df[f"p_{k}"].to_numpy(dtype=float)
-        df[f"q_{k}"] = bh_fdr(np.where(fl, p, np.nan))      # floor first, then BH among floor-passing units
+        tested = np.where(fl, p, np.nan)
+        df[f"q_{k}"] = bh_fdr(tested)                       # floor first, then BH among the floor-passing tested units
+        df[f"fdr_family_n_{k}"] = int(np.isfinite(tested).sum())
     df["fdr_family_n"] = int(fl.sum())
     return df
 
@@ -430,6 +432,12 @@ def _flag_and_score(df: pd.DataFrame, cfg) -> pd.DataFrame:
         col = f"q_{k}"
         df[f"c_{k}"] = (df[col] < q).fillna(False).astype(bool) if col in df else False
     df["n_criteria"] = df[[f"c_{k}" for k in CRITERION_KEYS]].sum(axis=1)
+    # The information onset / end are only meaningful for units whose cluster passes the permutation test.
+    if "onset_ms" in df:
+        ns = ~df["c_locus"].to_numpy(bool)
+        df.loc[ns, ["onset_ms", "locus_end_ms"]] = np.nan
+        if "sustained_to_go" in df:
+            df.loc[ns, "sustained_to_go"] = False
     w = sel.weights
     score = np.zeros(len(df))
     for k in CRITERION_KEYS:
@@ -552,7 +560,11 @@ def select_neurons(cache: SessionCache, cfg, trial_idx: np.ndarray | None = None
         df.loc[chosen.index, "selected"] = True
         df.loc[chosen.index, "rank"] = np.arange(1, len(chosen) + 1)
         n_el = int(reg.eligible.sum())
-        bound = (k ** 2) / ((2 * min_stab - 1) * n_el) if (n_el > 0 and min_stab > 0.5) else np.nan
+        # Meinshausen-Buehlmann bound on the expected number of falsely selected units, with q = the number
+        # actually selected (K_eff) and p = the eligible candidates; it is informative only when q << p, so it is
+        # capped at K_eff (a bound above the number selected says nothing).
+        q_sel = int(len(chosen))
+        bound = min(q_sel ** 2 / ((2 * min_stab - 1) * n_el), float(q_sel)) if (n_el > 0 and min_stab > 0.5 and q_sel > 0) else np.nan
         funnel_rows.append({"session": cache.session, "region": r, "recorded": int(len(reg)), "pass_floor": int(reg.pass_floor.sum()),
                             "eligible": n_el, "stable": int((reg.eligible & reg.stable).sum()), "selected": int(len(chosen)),
                             "K": k, "filled_by_score": int(n_fill), "expected_false_selections_bound": bound,

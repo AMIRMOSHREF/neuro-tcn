@@ -15,14 +15,18 @@ from ..features.spectral import band_power_cwt, band_power_stft, cwt_scalogram, 
 from .style import CLASS_COLORS, apply_style, panel_label
 
 
-def plot_time_frequency(cache: SessionCache, table: pd.DataFrame, cfg, trial_idx: int, out_path: Path) -> Path:
+def plot_time_frequency(cache: SessionCache, table: pd.DataFrame, cfg, trial_idx: int, out_path: Path,
+                        fit_idx: np.ndarray | None = None) -> Path:
+    """Figure 2. ``fit_idx`` restricts the class-conditional panels (rows 2-3) to the trials the selection
+    statistics used, so test-trial labels never enter the evidence figures; row 1 shows the single trial ``trial_idx``."""
     apply_style()
     bands = {k: list(v) for k, v in cfg.selection.bands_hz.items()}
     freqs = np.geomspace(1, 30, 40)
     bin_ms = cache.bin_ms
     T = cache.context[REGIONS[0]].shape[2]
     tvec = (np.arange(T) + 0.5) * bin_ms / 1000.0
-    y = cache.labels
+    fit = np.arange(cache.n_trials) if fit_idx is None else np.asarray(fit_idx, dtype=int)
+    y = cache.labels[fit]
 
     fig, axes = plt.subplots(3, 4, figsize=(16, 9.5), gridspec_kw={"height_ratios": [1.2, 1, 1], "hspace": 0.55, "wspace": 0.4})
     for j, r in enumerate(REGIONS):
@@ -45,12 +49,12 @@ def plot_time_frequency(cache: SessionCache, table: pd.DataFrame, cfg, trial_idx
             cb = plt.colorbar(im, ax=ax, pad=0.02, fraction=0.05)
             cb.set_label("log10 power", fontsize=6)
             cb.ax.tick_params(labelsize=5.5)
-        ax.set_title(f"{REGION_LABELS[r]} - CWT, trial {cache.trials[trial_idx]} ({CLASSES[y[trial_idx]]})", color=REGION_COLORS[r], loc="left", fontweight="bold")
+        ax.set_title(f"{REGION_LABELS[r]} - CWT, trial {cache.trials[trial_idx]} ({CLASSES[int(cache.labels[trial_idx])]})", color=REGION_COLORS[r], loc="left", fontweight="bold")
         ax.set_ylabel("frequency (Hz)")
         ax.set_xlabel("time from delay onset (s)")
         # Row 2: STFT band power over time per class (population of selected units).
         ax = axes[1, j]
-        pops = smooth_rates(cache.context[r][:, units].mean(1), bin_ms, cfg.data.smoothing_sigma_ms)
+        pops = smooth_rates(cache.context[r][fit][:, units].mean(1), bin_ms, cfg.data.smoothing_sigma_ms)
         bp = band_power_stft(pops, bin_ms, bands)  # (n_trials, n_bands, T)
         for b_i, bname in enumerate(bands):
             for c_i, c in enumerate(CLASSES):
@@ -66,8 +70,8 @@ def plot_time_frequency(cache: SessionCache, table: pd.DataFrame, cfg, trial_idx
         # Row 3: per-unit CWT band power (delay mean) by class for the selected units.
         ax = axes[2, j]
         if len(units):
-            n_tr = cache.n_trials
-            rates = smooth_rates(cache.context[r][:, units].reshape(n_tr * len(units), T), bin_ms, cfg.data.smoothing_sigma_ms)
+            n_tr = len(fit)
+            rates = smooth_rates(cache.context[r][fit][:, units].reshape(n_tr * len(units), T), bin_ms, cfg.data.smoothing_sigma_ms)
             bpc, names = band_power_cwt(rates, bin_ms, bands, cfg.selection.wavelet)
             bpc = bpc.reshape(n_tr, len(units), -1)
             w = 0.25

@@ -243,15 +243,23 @@ def mannwhitney_vectorised(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np
 
 
 def within_class_rank_corr(x: np.ndarray, y: np.ndarray, labels: np.ndarray, n_perm: int = 500,
-                           rng: np.random.Generator | None = None, min_per_class: int = 5) -> tuple[np.ndarray, np.ndarray]:
-    """Class-conditioned rank correlation between columns of x and y, with a drift-preserving permutation p.
+                           rng: np.random.Generator | None = None, min_per_class: int = 5,
+                           drift_window: int = 31) -> tuple[np.ndarray, np.ndarray]:
+    """Class-conditioned, drift-corrected rank correlation between columns of x and y, with a permutation-
+    calibrated p-value.
 
-    Within every class (with >= ``min_per_class`` trials) the trials are ranked and centred, so a shared class
-    variable cannot create a correlation. The null distribution is built from ``n_perm`` *circular shifts* of
-    the y-ranks along the trial order inside each class (the same shift for every unit), which keeps the slow
-    autocorrelation (drift) of both variables intact and only destroys their trial-by-trial pairing.
-    Returns (rho, p) per column; columns constant within all classes give NaN.
+    Within every class (with >= ``min_per_class`` trials) the trials are ranked, centred and - when the class
+    has at least ``drift_window`` trials - **detrended** by subtracting a running mean of the ranks over trial
+    order (window ``drift_window``), so neither a shared class variable nor slow shared drift (electrode drift,
+    arousal, satiety) can create a correlation. The null distribution is built from ``n_perm`` *circular
+    shifts* of the y-ranks along the trial order inside each class (the same shift for every unit), which keeps
+    the residual autocorrelation intact and only destroys the trial-by-trial pairing. The p-value is the
+    two-sided tail of the observed statistic under a normal fit to that null (mean / SD of the ``n_perm``
+    permuted correlations): it inherits the drift-aware calibration of the permutation null but is not limited
+    to the 1/(n_perm+1) resolution of an empirical count, which matters when p-values then enter a BH-FDR
+    across thousands of units. Returns (rho, p) per column; columns constant within all classes give NaN.
     """
+    from scipy.ndimage import uniform_filter1d
     rng = rng or np.random.default_rng(0)
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -264,8 +272,12 @@ def within_class_rank_corr(x: np.ndarray, y: np.ndarray, labels: np.ndarray, n_p
         if len(idx) < min_per_class:
             continue
         groups.append(idx)
-        rx[idx] = rankdata(x[idx], axis=0) - (len(idx) + 1) / 2
-        ry[idx] = rankdata(y[idx], axis=0) - (len(idx) + 1) / 2
+        gx = rankdata(x[idx], axis=0) - (len(idx) + 1) / 2
+        gy = rankdata(y[idx], axis=0) - (len(idx) + 1) / 2
+        if drift_window and len(idx) >= int(drift_window):
+            gx = gx - uniform_filter1d(gx, size=int(drift_window), axis=0, mode="nearest")
+            gy = gy - uniform_filter1d(gy, size=int(drift_window), axis=0, mode="nearest")
+        rx[idx], ry[idx] = gx, gy
     rho = np.full(m, np.nan)
     p = np.full(m, np.nan)
     if not groups:
@@ -277,14 +289,17 @@ def within_class_rank_corr(x: np.ndarray, y: np.ndarray, labels: np.ndarray, n_p
         return rho, p
     denom = np.where(ok, sx * sy, 1.0)
     r_obs = (rx * ry).sum(axis=0) / denom
-    count = np.zeros(m)
-    for _ in range(int(n_perm)):
+    perm = np.empty((int(n_perm), m))
+    for b in range(int(n_perm)):
         ry_p = ry.copy()
         for idx in groups:
             k = int(rng.integers(1, len(idx)))
             ry_p[idx] = np.roll(ry[idx], k, axis=0)
-        r_p = (rx * ry_p).sum(axis=0) / denom
-        count += np.abs(r_p) >= np.abs(r_obs) - 1e-12
+        perm[b] = (rx * ry_p).sum(axis=0) / denom
+    mu, sd = perm.mean(axis=0), perm.std(axis=0, ddof=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z = (r_obs - mu) / np.where(sd > 0, sd, np.nan)
+    pv = 2 * stats.norm.sf(np.abs(z))
     rho[ok] = r_obs[ok]
-    p[ok] = (1.0 + count[ok]) / (1.0 + n_perm)
+    p[ok] = np.clip(np.where(np.isfinite(pv), pv, 1.0), 1e-300, 1.0)[ok]
     return rho, p

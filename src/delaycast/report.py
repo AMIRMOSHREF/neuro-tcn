@@ -71,7 +71,7 @@ CLAIM = (
 ALPHA = 0.05                # significance level of every test
 NOT_LOWER_MARGIN = 0.02     # non-inferiority margin (balanced accuracy) for "not lower than" claims
 N_BOOT = 1000               # session resamples for the CI of the mean paired difference
-MIN_SESSIONS = 3            # fewer overlapping sessions -> "not testable"
+MIN_SESSIONS = 5            # fewer overlapping sessions -> "not testable" (an exact one-sided Wilcoxon cannot reach p < 0.05 below n = 5)
 TAU95_MAX_MS = 500.0        # P3: the last 500 ms must retain 95 % of the accuracy
 MIN_IGNORE_TRIALS = 30      # P5b: fewer Ignore test trials -> "not testable"
 MIN_AGREEMENT_CELLS = 8     # P6: session x region cells needed for the sign test to be informative
@@ -427,14 +427,15 @@ def _p3(runs: dict) -> dict:
     """Late-delay sufficiency: (i) CSI tau95 CI upper bound <= 500 ms, (ii) occluding the last window costs
     more than occluding an earlier window (paired per session), (iii) the linear decoder's tau95 (reported).
 
-    (ii) is tested against the *mean* of the earlier windows rather than the single worst earlier window,
-    because with ~10 overlapping windows the minimum of noisy deltas is biased downwards; the pooled argmin is
-    reported alongside so the reader can see whether the last window is literally the worst one."""
+    (ii) follows the claim literally: per session, the last window's delta is compared with the *worst* (most
+    negative) earlier window, so the last window has to cost more than any earlier window; the mean of the earlier
+    windows is reported alongside. (i) additionally requires the full-context accuracy to be above the chance
+    p95 of that seed, otherwise a flat, chance-level sweep would satisfy the tau95 rule trivially."""
     crit = runs.get("criteria")
     out: dict[str, Any] = {"id": "P3", "title": "Last 500 ms retain >= 95 % of accuracy; last window costs most",
-                           "comparator": "criteria run: CSI tau95 CI; temporal occlusion last window vs mean of earlier windows",
-                           "statistic": f"tau95 CI upper <= {TAU95_MAX_MS:.0f} ms (all seeds) AND paired delta(last) - mean delta(earlier) < 0",
-                           "failure_condition": f"any seed tau95 CI upper > {TAU95_MAX_MS:.0f} ms, or occlusion test p >= 0.05 / CI upper >= 0",
+                           "comparator": "criteria run: CSI tau95 CI (full-context accuracy above chance p95); temporal occlusion last window vs worst earlier window",
+                           "statistic": f"tau95 CI upper <= {TAU95_MAX_MS:.0f} ms (all seeds, full-context accuracy > chance p95) AND paired delta(last) - min delta(earlier) < 0",
+                           "failure_condition": f"any seed at chance or with tau95 CI upper > {TAU95_MAX_MS:.0f} ms, or occlusion test p >= 0.05 / CI upper >= 0",
                            "csi_per_seed": [], "linear_tau95_per_seed": [], "argmin_window_per_seed": []}
     if not crit:
         out.update({"verdict": "not run", "result": "missing: criteria", "comparison": {"verdict": "not run"}})
@@ -444,9 +445,13 @@ def _p3(runs: dict) -> dict:
         csi = res.get("csi") or {}
         ci = csi.get("tau95_ci_ms") or [None, None]
         hi = _finite(ci[1] if len(ci) == 2 else None)
+        full_acc = _finite((res.get("classification") or {}).get("balanced_accuracy"))
+        p95 = _finite((res.get("chance") or {}).get("p95"))
+        above_chance = (not math.isnan(full_acc)) and (not math.isnan(p95)) and full_acc > p95
         out["csi_per_seed"].append({"seed": int(res.get("seed", 0)), "tau95_ms": _finite(csi.get("tau95_ms")),
                                     "tau95_ci_ms": [_finite(ci[0] if len(ci) == 2 else None), hi],
-                                    "pass": bool(hi <= TAU95_MAX_MS) if not math.isnan(hi) else False})
+                                    "full_balanced_accuracy": full_acc, "chance_p95": p95, "above_chance": above_chance,
+                                    "pass": bool(above_chance and hi <= TAU95_MAX_MS) if not math.isnan(hi) else False})
         lin = _finite(res.get("tau95_linear_ms"))
         out["linear_tau95_per_seed"].append({"seed": int(res.get("seed", 0)), "tau95_linear_ms": lin,
                                              "pass": bool(lin <= TAU95_MAX_MS) if not math.isnan(lin) else False})
@@ -475,10 +480,10 @@ def _p3(runs: dict) -> dict:
             ev = [v for v in ev if not math.isnan(v)]
             if lv and ev:
                 last.setdefault(s, []).append(float(np.mean(lv)))
-                earlier.setdefault(s, []).append(float(np.mean(ev)))
+                earlier.setdefault(s, []).append(float(np.min(ev)))      # the worst earlier window
     rows = [{"session": s, "a": float(np.mean(last[s])), "b": float(np.mean(earlier[s])),
              "diff": float(np.mean(last[s]) - np.mean(earlier[s]))} for s in sorted(set(last) & set(earlier))]
-    comp: dict[str, Any] = {"arm_a": "delta(last window)", "arm_b": "mean delta(earlier windows)", "metric": "delta_balanced_accuracy",
+    comp: dict[str, Any] = {"arm_a": "delta(last window)", "arm_b": "min delta(earlier windows)", "metric": "delta_balanced_accuracy",
                             "table": rows, "n_seeds": len(crit), "n_seeds_a": len(crit), "n_seeds_b": len(crit)}
     if rows:
         comp.update(paired_test(np.array([r["diff"] for r in rows]), "<"))

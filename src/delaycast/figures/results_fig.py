@@ -279,7 +279,7 @@ def _panel_arms(ax, results_by_run: dict[str, list[dict]], crit: list[dict]) -> 
             ax.errorbar(x[i], vals[i], yerr=[[max(vals[i] - lo, 0)], [max(hi - vals[i], 0)]], color="#333333", lw=0.7,
                         capsize=1.5, zorder=3)
             kinds.add(kind)
-        ax.text(x[i], 0.02, f"{vals[i]:.2f}", ha="center", va="bottom", fontsize=5, color="white" if vals[i] > 0.12 else "#333333",
+        ax.text(x[i], 0.02, f"{vals[i]:.2f}", ha="center", va="bottom", fontsize=5, color="#222222",
                 transform=ax.get_xaxis_transform())
     mean, p95 = _chance(crit)
     _chance_band(ax, p95, mean)
@@ -341,7 +341,7 @@ def _panel_per_session(ax, results_by_run: dict[str, list[dict]], crit: list[dic
                Line2D([], [], marker="^", ms=4.5, mfc="white", mec="#d55e00", ls="none", label="cross-dataset (adapters only)"),
                Line2D([], [], marker="x", ms=4, color="#8a8a8a", ls="none", label="negative control (labels permuted)"),
                Line2D([], [], color="#9a9a9a", lw=0.6, ls=":", label="chance (permutation null, band = 95th pct)")]
-    ax.legend(handles=handles, loc="lower right", fontsize=5.0, ncol=1)
+    ax.legend(handles=handles, loc="lower right", fontsize=5.0, ncol=1, framealpha=0.6)
     for ds in sorted(set(dataset_of(s) for s in sessions)):
         rows = [ypos[s] for s in sessions if dataset_of(s) == ds]
         ax.text(1.005, float(np.mean(rows)), f"dataset {ds}" if ds else "", transform=ax.get_yaxis_transform(), fontsize=5.5,

@@ -104,7 +104,7 @@ def fit_trials(split: dict[str, np.ndarray]) -> np.ndarray:
 
 
 def _selection_cache_path(cfg: Config, cache: SessionCache, idx: np.ndarray, seed: int) -> Path:
-    payload = json.dumps(cfg.selection.to_plain(), sort_keys=True, default=str) + _features_key(cfg, cache)
+    payload = json.dumps(cfg.selection.to_plain(), sort_keys=True, default=str) + _features_key(cfg, cache) + "|stats_v2"
     h = hashlib.md5(payload.encode() + np.asarray(idx, dtype=np.int64).tobytes() + cache.labels.astype(np.int64).tobytes()).hexdigest()[:12]
     return Path(cfg.data.cache_dir) / "selection" / f"{cache.session.replace('/', '__')}_{h}_s{seed}.pkl"
 
@@ -137,8 +137,8 @@ def prepare_sessions(cfg: Config, caches: dict[str, SessionCache], mode: str = "
     """Neuron selection (criteria mode only) and model tensors.
 
     Sessions with train/val trials: criteria on the fit trials (train + val).  Held-out sessions:
-    ``selection.holdout_mode`` = ``label_free`` (default; floor + coupling + net ramp on *all* trials of the
-    session, no label ever read) or ``adapt`` (full criteria on the adapt trials only)."""
+    ``selection.holdout_mode`` = ``label_free`` (default; floor + coupling + net ramp on the *adapt* trials only,
+    no label ever read and no test trial ever touched) or ``adapt`` (full criteria on the adapt trials)."""
     seed = int(cfg.train.seed) if seed is None else int(seed)
     held = set(holdout or [])
     holdout_mode = str(cfg.selection.get_path("holdout_mode", "label_free"))
@@ -147,7 +147,7 @@ def prepare_sessions(cfg: Config, caches: dict[str, SessionCache], mode: str = "
         idx = fit_trials(splits[s]) if splits is not None else None
         if mode == "criteria":
             if s in held and holdout_mode == "label_free":
-                sel = cached_selection(cfg, c, None, seed, label_free=True)
+                sel = cached_selection(cfg, c, idx, seed, label_free=True)
             else:
                 sel = cached_selection(cfg, c, idx if bool(cfg.selection.get_path("fit_on_train_only", True)) else None, seed)
         else:
@@ -353,6 +353,13 @@ def run_training(cfg: Config, mode: str = "criteria", out_dir: Path | None = Non
         caches = permute_labels(caches, seed + 12345)
     splits = make_splits(cfg, caches, holdout, seed)
     selections, tensors = prepare_sessions(cfg, caches, mode=mode, splits=splits, seed=seed, holdout=_as_list(holdout))
+    if negative_control and mode == "criteria" and not any(t.neuron_mask[r].any() for t in tensors for r in REGIONS):
+        # With permuted labels the label-dependent criteria usually select nothing, which would make the control
+        # trivially at chance without exercising the training / evaluation path. Fall back to the label-free
+        # ``rate`` units so the network is really trained on permuted labels (this is logged and recorded).
+        log.warning("negative control: permuted-label selection is empty in every session; using rate-mode units")
+        selections, tensors = prepare_sessions(cfg, caches, mode="rate", splits=splits, seed=seed, holdout=_as_list(holdout))
+        mode = "criteria(rate-fallback)"
     for s in selections:
         if s is not None:
             s.table.to_csv(out_dir / f"selection_{s.session.replace('/', '__')}.csv", index=False)

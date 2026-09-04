@@ -460,11 +460,15 @@ def _column_b(fig, gs_cell, spikes, table, cache, ep, t0, x_lim, first_lick, lic
 
 
 # ----------------------------------------------------------------------------------------------- column C
-def _column_c(fig, gs_cell, table, cache, cfg, k_per_region):
+def _column_c(fig, gs_cell, table, cache, cfg, k_per_region, fit_idx=None):
     """Exemplar per region: class-conditional mean +- SEM rate of the rank-1 unit over delay -> response, the
-    late-delay coupling window, the information onset and the per-trial coupling scatter."""
+    late-delay coupling window, the information onset and the per-trial coupling scatter.
+
+    ``fit_idx`` restricts every trial-conditioned quantity to the trials the selection statistics were computed
+    on (the training split of a run), so the panel never shows test-trial labels or spikes."""
     gs = gs_cell.subgridspec(4, 1, hspace=0.30)
-    y = cache.labels
+    fit = np.arange(cache.n_trials) if fit_idx is None else np.asarray(fit_idx, dtype=int)
+    y = cache.labels[fit]
     bin_s, tbin_s = cache.bin_ms / 1000.0, cache.target_bin_ms / 1000.0
     delay_s = float(cfg.data.get_path("context.delay_ms", 1200)) / 1000.0
     late_s = float(cfg.selection.late_delay_ms) / 1000.0
@@ -489,8 +493,8 @@ def _column_c(fig, gs_cell, table, cache, cfg, k_per_region):
             continue
         row = top.iloc[0]
         u = int(row.unit_index)
-        ctx = cache.context[r][:, u].astype(float)      # (n_trials, T_ctx)
-        tgt = cache.target[r][:, u].astype(float)       # (n_trials, T_tgt)
+        ctx = cache.context[r][fit, u].astype(float)    # (n_fit_trials, T_ctx)
+        tgt = cache.target[r][fit, u].astype(float)     # (n_fit_trials, T_tgt)
         rate_ctx = smooth_rates(ctx, cache.bin_ms, sigma)
         rate_tgt = tgt / tbin_s
         for c_i, c in enumerate(CLASSES):
@@ -534,7 +538,7 @@ def _column_c(fig, gs_cell, table, cache, cfg, k_per_region):
         if i < 3:
             ax.tick_params(labelbottom=False)
     axes[-1].set_xlabel("time from delay onset (s)", labelpad=1.5)
-    counts = cache.class_counts()
+    counts = {c: int((y == i).sum()) for i, c in enumerate(CLASSES)}
     handles = [Line2D([], [], color=CLASS_COLORS[c], lw=1.2, label=f"{c} n={counts[c]}") for c in CLASSES]
     return axes, handles
 
@@ -635,7 +639,8 @@ def _colorbars(fig, x0, x1, y_top, imp_max):
 
 # ----------------------------------------------------------------------------------------------- main entry point
 def plot_raster_selection(npz_path, cache: SessionCache, table: pd.DataFrame, cfg, out_path: Path, trial_label: str = "",
-                          source_note: str = "", importance: pd.DataFrame | None = None, qc_note: str = "") -> Path:
+                          source_note: str = "", importance: pd.DataFrame | None = None, qc_note: str = "",
+                          fit_idx: np.ndarray | None = None) -> Path:
     """Render Figure 1 for one trial of ``cache`` and write ``out_path`` (PNG) plus the same name with ``.pdf``.
 
     Parameters
@@ -695,7 +700,7 @@ def plot_raster_selection(npz_path, cache: SessionCache, table: pd.DataFrame, cf
 
     axes_a = _column_a(fig, outer[0, 0], spikes, table, cache, ep, t0, x_lim, first_lick, lick_class, row_mode, k_per_region)
     axes_b = _column_b(fig, outer[0, 1], spikes, table, cache, ep, t0, x_lim, first_lick, lick_class, k_per_region, imp, imp_max)
-    axes_c, class_handles = _column_c(fig, outer[0, 2], table, cache, cfg, k_per_region)
+    axes_c, class_handles = _column_c(fig, outer[0, 2], table, cache, cfg, k_per_region, fit_idx=fit_idx)
     gs_f = outer[1, :].subgridspec(1, 2, width_ratios=[2.2, 1], wspace=0.06)
     ax_text = _footer_text(fig, gs_f[0, 0], cfg, table)
     ax_funnel = _footer_funnel(fig, gs_f[0, 1], table, cache)

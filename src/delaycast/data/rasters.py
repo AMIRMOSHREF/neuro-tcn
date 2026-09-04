@@ -318,6 +318,10 @@ def load_trial_rasters(npz_path, cfg, metadata: dict | None = None) -> TrialRast
         ctx_start = delay_start - cfg.data.context.pre_delay_ms / 1000.0
     ctx_stop = go_start
     n_ctx = int(round((ctx_stop - ctx_start) / bin_s))
+    # Anchor the grid at the go cue: the last context edge is exactly ``go_start`` on every trial, so a spike
+    # fired at or after go can never enter the context (it belongs to the target). A +-5 ms mismatch between the
+    # nominal delay and the bin grid therefore shows up at the delay-onset end, where nothing depends on it.
+    ctx_start = go_start - n_ctx * bin_s
     ctx_edges = ctx_start + np.arange(n_ctx + 1) * bin_s
 
     tgt_stop = go_start + cfg.data.target.response_ms / 1000.0

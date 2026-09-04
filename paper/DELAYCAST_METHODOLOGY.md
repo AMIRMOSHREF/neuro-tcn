@@ -53,7 +53,7 @@ Statistics are computed on the **fit trials only** — the training + validation
 |---|---|---|---|
 | floor | activity floor | mean delay rate ≥ 1 Hz and spikes on ≥ 20 % of trials | silent / unstable units cannot carry single-trial information |
 | **S** | choice selectivity | Mann-Whitney U, delay spike count **Left vs Right**; effect size AUROC<sub>LR</sub> | the unit's delay rate differs by upcoming lick direction |
-| **C** | delay → response coupling | rank correlation between the unit's late-delay (last 400 ms) rate and its own response-epoch rate, **within class**; p from circular-shift permutations that preserve slow drift | the unit's own past predicts its own future beyond choice and drift — what the forecaster must exploit |
+| **C** | delay → response coupling | rank correlation between the unit's late-delay (last 400 ms) rate and its own response-epoch rate, **within class and after removing slow drift** (running-mean detrending of the ranks over trial order); p calibrated on circular-shift permutations of the trial order | the unit's own past predicts its own future beyond choice and drift — what the forecaster must exploit |
 | **W** | spectro-temporal selectivity | Mann-Whitney U Left vs Right of complex-Morlet CWT band power (slow / theta / beta) **after regressing out spike count**; Bonferroni over bands | rhythmic / transient structure that mean rate cannot see, and that is not a rate test in disguise |
 | **R** | ramping | Wilcoxon signed-rank across trials of (late − early delay rate) **within each class** (Bonferroni over classes); slope in Hz/s | trial-level, choice-specific preparatory build-up (the ALM ramp) |
 | T | temporal locus *(descriptive)* | AUROC<sub>LR</sub> in sliding 200 ms windows (50 ms step); cluster-mass permutation test → **information onset**, peak window, late-window AUROC, sustained-to-go | which part of the past context the unit's information lives in |
@@ -75,7 +75,8 @@ size, onset, coupling, wavelet band, ramp slope, stability with its denominator,
 and a fixed-field `reason_short` used in the figure.
 
 Held-out sessions (cross-session / cross-dataset evaluation) are selected **label-free** (floor + C + a net ramp test,
-never reading a label; `selection.holdout_mode`), so transfer claims cannot leak.
+never reading a label) **on their adapt trials only** (`selection.holdout_mode`); the test trials of a held-out
+session are never touched by selection, adapter fitting or any statistic, so transfer claims cannot leak.
 
 ## 4. Stage 2 — DelayCAST-Net v2
 

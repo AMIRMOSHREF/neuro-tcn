@@ -105,10 +105,11 @@ def aggregate_holdouts(parent: Path, cfg=None) -> dict | None:
     logits = np.log(np.clip(prob, 1e-9, None))
     sessions = df.session.to_numpy()
     rng = np.random.default_rng(0)
+    n_shuffles = int(cfg.evaluate.get_path("n_shuffles", 1000)) if cfg is not None else 1000
     first = next(iter(leaf_results.values()))
     agg = {k: first.get(k) for k in ("mode", "seed", "eval_mode", "negative_control", "spectral_branch", "occlusion")}
     agg.update({"aggregate_of": [d.name for d in leaves], "classification": metrics(y, logits),
-                "per_session": per_session_metrics(y, logits, sessions), "chance": chance_level(y, logits.argmax(1), sessions, 1000, rng)})
+                "per_session": per_session_metrics(y, logits, sessions), "chance": chance_level(y, logits.argmax(1), sessions, n_shuffles, rng)})
     agg["chance_balanced_accuracy"] = {"mean": agg["chance"]["mean"], "p95": agg["chance"]["p95"]}
     from sklearn.metrics import confusion_matrix
     agg["confusion"] = confusion_matrix(y, logits.argmax(1), labels=list(range(len(CLASSES)))).tolist()
@@ -146,6 +147,8 @@ def _mean_rows(list_of_rowlists: list[list[dict]]) -> list[dict]:
                 merged[k] = float(np.nanmean([v for v in vals if v is not None]))
             elif isinstance(vals[0], dict) and k == "per_session":
                 merged[k] = {kk: vv for v in vals if isinstance(v, dict) for kk, vv in v.items()}
+            elif isinstance(vals[0], list) and k == "per_session":
+                merged[k] = [row for v in vals if isinstance(v, list) for row in v]
             else:
                 merged[k] = vals[0]
         out.append(merged)

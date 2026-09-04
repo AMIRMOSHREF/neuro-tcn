@@ -65,7 +65,7 @@ def _index_videos(video_root: Path) -> dict[tuple[str, int], Path]:
 
 # --------------------------------------------------------------------------- Dataset A
 def discover_dataset_a(root: str | Path) -> list[TrialRecord]:
-    root = Path(root)
+    root = Path(root).resolve()
     records: list[TrialRecord] = []
     if not root.is_dir():
         return records
@@ -115,7 +115,7 @@ def _load_combined(root: Path) -> pd.DataFrame | None:
 
 
 def discover_dataset_b(root: str | Path) -> list[TrialRecord]:
-    root = Path(root)
+    root = Path(root).resolve()
     records: list[TrialRecord] = []
     if not root.is_dir():
         return records

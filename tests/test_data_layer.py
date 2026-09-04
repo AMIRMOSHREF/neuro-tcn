@@ -492,3 +492,28 @@ def test_kruskal_mannwhitney_wilcoxon_match_scipy():
     # no non-zero column at all -> early return with NaNs
     e0, p0 = wilcoxon_vectorised(np.zeros((6, 3)))
     assert np.isnan(e0).all() and np.isnan(p0).all()
+
+
+def test_context_grid_is_anchored_at_go(tmp_path):
+    """The last context edge is the go cue even when the delay is not a whole number of bins; a spike just
+    after go must fall in the target, never in the last context bin."""
+    import numpy as np
+    from delaycast.config import load_config
+    from delaycast.data.rasters import load_trial_rasters
+    from rodent_tcnn.data.synthetic import generate_trial
+
+    payload = generate_trial("Left", 6, np.random.default_rng(0), 1)
+    go = float(payload["delay_start_times"]) + 1.2057          # 120.57 bins -> rounds to 121 bins of 10 ms
+    payload["delay_stop_times"] = np.asarray(go)
+    payload["go_start_times"] = np.asarray(go)
+    payload["go_stop_times"] = np.asarray(go + 1.5)
+    st = np.asarray(payload["spike_times"], dtype=object)
+    st[0] = np.asarray([go + 0.002])                            # a spike 2 ms after the go cue
+    payload["spike_times"] = st
+    p = tmp_path / "t.npz"
+    np.savez(p, **payload)
+    tr = load_trial_rasters(p, load_config(None))
+    assert tr.ctx_edges[-1] == pytest.approx(go, abs=1e-9)
+    region = [r for r in tr.context if tr.context[r].shape[0] > 0][0]
+    assert tr.context[region][0, -1] == 0
+    assert tr.target[region][0, 0] == 1

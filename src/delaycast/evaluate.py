@@ -13,7 +13,7 @@ within-session split, or the non-adapted trials of held-out sessions):
   for the classifier and for the forecaster (backbone-only variant with the persistence input held fixed);
 * **region ablation**: permutation occlusion of a whole region and in-distribution region drop
   (the model was trained with region dropout);
-* **neuron importance**: permutation occlusion of every selected neuron (one batched forward per region),
+* **neuron importance**: permutation occlusion of every selected neuron (one forward pass per neuron and session),
   delta cross-entropy / balanced accuracy / forecast deviance of the *other* neurons, joined with the
   selection statistics and the learned gates -> ``neuron_importance.csv`` and agreement statistics;
 * linear baselines: tuned multinomial logistic regression on all units (delay mean + late-delay mean per
@@ -394,8 +394,9 @@ def csi_from_sweep(sweep_logits: dict[int, np.ndarray], y: np.ndarray, sessions:
         a, b = _tau95(idx)
         t95_b.append(a)
         t95_ll.append(b)
-    return {"tau95_ms": t_point, "tau95_median_ms": float(np.median(t95_b)), "tau95_ci_ms": [float(np.percentile(t95_b, 2.5)), float(np.percentile(t95_b, 97.5))],
-            "tau95_logloss_ms": t_point_ll, "tau95_logloss_ci_ms": [float(np.percentile(t95_ll, 2.5)), float(np.percentile(t95_ll, 97.5))],
+    pct = lambda v, q: float(np.percentile(v, q, method="closest_observation"))   # CI bounds stay on the sweep grid
+    return {"tau95_ms": t_point, "tau95_median_ms": float(np.median(t95_b)), "tau95_ci_ms": [pct(t95_b, 2.5), pct(t95_b, 97.5)],
+            "tau95_logloss_ms": t_point_ll, "tau95_logloss_ci_ms": [pct(t95_ll, 2.5), pct(t95_ll, 97.5)],
             "fraction": frac, "n_bootstrap": int(n_boot)}
 
 
@@ -576,7 +577,8 @@ def evaluate_run(run: dict, cfg, caches: dict | None = None) -> dict:
                                  "delta_log_loss": m["log_loss"] - base_ll_s, "delta_balanced_accuracy": m["balanced_accuracy"] - base_bacc_s,
                                  "delta_forecast_deviance_explained_others": float(-d_dev),
                                  "gate": float(att["gates"][s][r][k]), "gate_rel": float(att["gates"][s][r][k] / max(att["gates"][s][r][: k_real].max(), 1e-9))})
-        imp = pd.DataFrame(rows)
+        imp = pd.DataFrame(rows, columns=["session", "region", "k_slot", "unit_index", "delta_log_loss", "delta_balanced_accuracy",
+                                          "delta_forecast_deviance_explained_others", "gate", "gate_rel"])
         # join with the selection statistics (score, stability, criteria) when they exist
         sel_tabs = {sel.session: sel.table for sel in run.get("selections", []) if sel is not None}
         if len(imp) and sel_tabs:

@@ -185,12 +185,20 @@ def _holdout_plan(cfg: Config, caches: dict, args) -> tuple[str, dict[str, list[
     raise SystemExit(f"unknown train.eval_mode {mode!r}")
 
 
+def _validate_arms(modes: list[str], variants: list[str]) -> None:
+    bad_m = [m for m in modes if m not in ("criteria", "rate", "random")]
+    bad_v = [v for v in variants if v not in ("nospec", "popmean")]
+    if bad_m or bad_v:
+        raise SystemExit(f"unknown --modes {bad_m} / --variants {bad_v} (modes: criteria,rate,random; variants: popmean,nospec)")
+
+
 def cmd_train(cfg: Config, args) -> None:
     from .train import get_caches
-    caches = get_caches(cfg)
-    kind, holdouts = _holdout_plan(cfg, caches, args)
     modes = _list(args.modes) or ["criteria"]
     variants = _list(getattr(args, "variants", None))
+    _validate_arms(modes, variants)
+    caches = get_caches(cfg)
+    kind, holdouts = _holdout_plan(cfg, caches, args)
     for seed in _seeds(cfg, args):
         for mode in modes:
             _train_one(cfg, mode, "", seed, kind, caches, holdouts, args.negative_control)
@@ -212,7 +220,8 @@ def cmd_evaluate(cfg: Config, args) -> None:
         for d in leaves:
             if not (d / "model.pt").is_file():
                 continue
-            cfg_v = _clone(cfg, **{"train.seed": ref.seed})
+            eval_mode = {"within": "within_session", "negative_control": "within_session"}.get(ref.kind, ref.kind)
+            cfg_v = _clone(cfg, **{"train.seed": ref.seed, "train.eval_mode": eval_mode})
             if ref.variant == "nospec":
                 cfg_v.set_path("model.spectral_branch", "none")
             elif ref.variant == "popmean":
@@ -224,11 +233,15 @@ def cmd_evaluate(cfg: Config, args) -> None:
 
 
 # ----------------------------------------------------------------------------- figures
-def _selection_table_for(cfg: Config, session: str, caches: dict) -> tuple[pd.DataFrame, str, pd.DataFrame | None]:
-    """Selection table shown in Figure 1: the criteria run's train-split table when it exists (what the model used),
-    else the descriptive all-trial table from `select`, else computed now. Returns (table, note, importance|None)."""
+def _selection_table_for(cfg: Config, session: str, caches: dict) -> tuple[pd.DataFrame, str, pd.DataFrame | None, np.ndarray | None]:
+    """Selection table shown in Figures 1-2: the criteria run's train-split table when it exists (what the model
+    used), else the descriptive all-trial table from `select`, else computed now.
+
+    Returns (table, note, importance | None, fit_trials | None); ``fit_trials`` is the trial subset the statistics
+    were computed on, so the class-conditional figure panels can be restricted to the same trials."""
     from .features.selection import select_neurons
     from .runs import list_runs
+    from .train import fit_trials
     tag = session.replace("/", "__")
     runs = [r for r in list_runs(cfg.output_dir) if r.kind == "within" and r.mode == "criteria" and not r.variant]
     imp = None
@@ -238,15 +251,25 @@ def _selection_table_for(cfg: Config, session: str, caches: dict) -> tuple[pd.Da
             tab = pd.read_csv(p)
             pi = r.path / "neuron_importance.csv"
             if pi.is_file():
-                imp_all = pd.read_csv(pi)
-                imp = imp_all[imp_all.session == session].copy() if "session" in imp_all else None
+                try:
+                    imp_all = pd.read_csv(pi)
+                    imp = imp_all[imp_all.session == session].copy() if "session" in imp_all else None
+                except pd.errors.EmptyDataError:
+                    imp = None
+            fit = None
+            sp = r.path / "splits.json"
+            if sp.is_file():
+                with open(sp, "r", encoding="utf-8") as f:
+                    d = json.load(f).get(session)
+                if d is not None:
+                    fit = fit_trials({k: np.asarray(v, int) for k, v in d.items()})
             src = f"training-split criteria of run {r.name} seed {r.seed}"
-            return tab, src, imp
+            return tab, src, imp, fit
     p = Path(cfg.output_dir) / "selection" / f"{tag}.csv"
     if p.is_file():
-        return pd.read_csv(p), "descriptive criteria on all trials (`delaycast select`)", None
+        return pd.read_csv(p), "descriptive criteria on all trials (`delaycast select`)", None, None
     res = select_neurons(caches[session], cfg, seed=int(cfg.train.seed), n_null=0)
-    return res.table, "descriptive criteria on all trials (computed now)", None
+    return res.table, "descriptive criteria on all trials (computed now)", None, None
 
 
 def _source_note(tab: pd.DataFrame, cfg: Config, src: str) -> str:
@@ -260,7 +283,7 @@ def _source_note(tab: pd.DataFrame, cfg: Config, src: str) -> str:
 
 def _fig1_for_trial(cfg: Config, cache, ti: int | None, npz_path: Path, out_path: Path, caches: dict, qc_note: str = "") -> Path:
     from .figures import plot_raster_selection
-    tab, src, imp = _selection_table_for(cfg, cache.session, caches)
+    tab, src, imp, fit = _selection_table_for(cfg, cache.session, caches)
     if ti is not None:
         trial_label = f"trial {int(cache.trials[ti])} - {CLASSES[int(cache.labels[ti])]}"
         fl = cache.meta.first_lick_s.iloc[ti] if "first_lick_s" in cache.meta else float("nan")
@@ -269,7 +292,7 @@ def _fig1_for_trial(cfg: Config, cache, ti: int | None, npz_path: Path, out_path
     else:
         trial_label = f"{npz_path.name} (not in cache)"
     return plot_raster_selection(npz_path, cache, tab, cfg, out_path, trial_label=trial_label,
-                                 source_note=_source_note(tab, cfg, src), importance=imp, qc_note=qc_note)
+                                 source_note=_source_note(tab, cfg, src), importance=imp, qc_note=qc_note, fit_idx=fit)
 
 
 def cmd_figures(cfg: Config, args) -> None:
@@ -298,8 +321,8 @@ def cmd_figures(cfg: Config, args) -> None:
         tag = c.session.replace("/", "__")
         npz = Path(c.meta.npz_path.iloc[ti])
         p1 = _fig1_for_trial(cfg, c, ti, npz, fig_dir / f"fig1_raster_selection_{tag}.png", caches)
-        tab, _, _ = _selection_table_for(cfg, c.session, caches)
-        p2 = plot_time_frequency(c, tab, cfg, ti, fig_dir / f"fig2_time_frequency_{tag}.png")
+        tab, _, _, fit = _selection_table_for(cfg, c.session, caches)
+        p2 = plot_time_frequency(c, tab, cfg, ti, fig_dir / f"fig2_time_frequency_{tag}.png", fit_idx=fit)
         print(f"wrote {p1}\nwrote {p2}")
 
     results = load_results(cfg.output_dir)
@@ -316,7 +339,7 @@ def cmd_figures(cfg: Config, args) -> None:
             p = ref.path / f"selection_{c.session.replace('/', '__')}.csv"
             if p.is_file():
                 sels[c.session] = pd.read_csv(p)
-        p3 = plot_attention(ref.path, results["criteria"][0], sels, cfg, fig_dir / "fig3_attention.png")
+        p3 = plot_attention(ref.path, results["criteria"], sels, cfg, fig_dir / "fig3_attention.png")   # all seeds
         print(f"wrote {p3}")
 
 
@@ -457,11 +480,12 @@ def main(argv: list[str] | None = None) -> None:
 
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
-    try:
-        import torch
-        torch.set_num_threads(max(1, os.cpu_count() or 1))
-    except Exception:  # pragma: no cover
-        pass
+    if not any(k in os.environ for k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "TORCH_NUM_THREADS")):
+        try:  # use every core unless the user limited threads through the usual environment variables
+            import torch
+            torch.set_num_threads(max(1, os.cpu_count() or 1))
+        except Exception:  # pragma: no cover
+            pass
     cfg = load_config(args.config, args.overrides)
     args.fn(cfg, args)
 
