@@ -237,8 +237,12 @@ def _train_one(cfg: Config, mode: str, variant: str, seed: int, kind: str, cache
         cfg_v.set_path("model.spectral_branch", "none")
     elif variant == "popmean":
         cfg_v.set_path("model.spectral_branch", "popmean")
+    elif variant == "noskip":     # backbone classifier only (the architecture without the linear count read-out)
+        cfg_v.set_path("model.linear_skip", False)
+    elif variant == "linonly":    # linear count read-out only (the deep path still trains the forecaster)
+        cfg_v.set_path("model.classifier_from_backbone", False)
     elif variant:
-        raise SystemExit(f"unknown variant {variant!r} (nospec | popmean)")
+        raise SystemExit(f"unknown variant {variant!r} (nospec | popmean | noskip | linonly)")
     if holdouts is None:
         d = run_dir(cfg.output_dir, kind, mode, variant, seed)
         log.info("=== run %s/%s%s seed %d -> %s", kind, mode, f"_{variant}" if variant else "", seed, d)
@@ -285,9 +289,9 @@ def _holdout_plan(cfg: Config, caches: dict, args) -> tuple[str, dict[str, list[
 
 def _validate_arms(modes: list[str], variants: list[str]) -> None:
     bad_m = [m for m in modes if m not in ("criteria", "rate", "random")]
-    bad_v = [v for v in variants if v not in ("nospec", "popmean")]
+    bad_v = [v for v in variants if v not in ("nospec", "popmean", "noskip", "linonly")]
     if bad_m or bad_v:
-        raise SystemExit(f"unknown --modes {bad_m} / --variants {bad_v} (modes: criteria,rate,random; variants: popmean,nospec)")
+        raise SystemExit(f"unknown --modes {bad_m} / --variants {bad_v} (modes: criteria,rate,random; variants: popmean,nospec,noskip,linonly)")
 
 
 def cmd_train(cfg: Config, args) -> None:
@@ -547,7 +551,7 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("train", help="train + evaluate DelayCAST-Net"); _common(p)
     p.add_argument("--modes", default="criteria", help="comma list of neuron sets: criteria,rate,random")
-    p.add_argument("--variants", default="", help="comma list of model ablations of the criteria set: popmean,nospec")
+    p.add_argument("--variants", default="", help="comma list of model ablations of the criteria set: popmean,nospec,noskip,linonly")
     p.add_argument("--seeds", default=None, help="comma list of seeds (default: train.seeds from the config)")
     p.add_argument("--holdout", default=None, help="cross_session: comma list of held-out session keys (default: all, one at a time)")
     p.add_argument("--negative-control", action="store_true", help="permute labels within session before selection/training")
@@ -570,7 +574,7 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("all", help="the whole protocol: cache -> select -> train -> cross-dataset -> negative control -> figures -> report"); _common(p)
     p.add_argument("--modes", default="criteria,rate,random")
-    p.add_argument("--variants", default="popmean")
+    p.add_argument("--variants", default="popmean,linonly,noskip")
     p.add_argument("--seeds", default=None)
     p.add_argument("--quick", action="store_true", help="one seed, within-session only, no controls (smoke test)")
     p.add_argument("--all-sessions", action="store_true")

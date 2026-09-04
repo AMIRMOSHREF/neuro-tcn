@@ -196,14 +196,16 @@ def predict(model: DelayCASTNet, loader: DataLoader, device, pad_mask_fn=None) -
 
 
 @torch.no_grad()
-def validation_loss(model, loader, cfg, cw, device) -> float:
+def validation_loss(model, loader, cfg, cw, device) -> tuple[float, float]:
+    """(multi-task validation loss, class-weighted validation cross-entropy)."""
     model.eval()
-    tot, n = 0.0, 0
+    tot, tot_ce, n = 0.0, 0.0, 0
     for batch in loader:
-        loss, _, _ = compute_loss(model, batch, cfg, cw, device)
+        loss, parts, _ = compute_loss(model, batch, cfg, cw, device)
         tot += loss.item() * len(batch["label"])
+        tot_ce += parts["ce"] * len(batch["label"])
         n += len(batch["label"])
-    return tot / max(n, 1)
+    return tot / max(n, 1), tot_ce / max(n, 1)
 
 
 def balanced_accuracy(y_true: np.ndarray, y_pred: np.ndarray, labels=None) -> float:
@@ -254,8 +256,12 @@ def fit(model: DelayCASTNet, train_ds: TrialDataset, val_ds: TrialDataset, cfg: 
     # Neuron gates get a larger learning rate and no weight decay so that they can actually move
     # within a short training run (weight decay would pull the logits towards 0.5).
     gate_ids = {id(p) for n, p in model.named_parameters() if ".gates." in n}
-    groups = [{"params": [p for p in params if id(p) not in gate_ids], "lr": float(cfg.train.lr), "weight_decay": float(cfg.train.weight_decay)},
-              {"params": [p for p in params if id(p) in gate_ids], "lr": float(cfg.train.lr) * float(cfg.train.get_path("gate_lr_mult", 10.0)), "weight_decay": 0.0}]
+    # The linear count read-out is a logistic regression on standardised features: it converges in a few hundred
+    # steps at a higher learning rate than the backbone and keeps the backbone's weight decay as its ridge penalty.
+    skip_ids = {id(p) for n, p in model.named_parameters() if ".skip." in n}
+    groups = [{"params": [p for p in params if id(p) not in gate_ids and id(p) not in skip_ids], "lr": float(cfg.train.lr), "weight_decay": float(cfg.train.weight_decay)},
+              {"params": [p for p in params if id(p) in gate_ids], "lr": float(cfg.train.lr) * float(cfg.train.get_path("gate_lr_mult", 10.0)), "weight_decay": 0.0},
+              {"params": [p for p in params if id(p) in skip_ids], "lr": float(cfg.train.lr) * float(cfg.train.get_path("skip_lr_mult", 5.0)), "weight_decay": float(cfg.train.weight_decay)}]
     opt = torch.optim.AdamW([g for g in groups if g["params"]])
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
     cw = class_weights(train_ds.labels(), cap=cfg.train.get_path("class_weight_cap", 5.0)).to(device)
@@ -287,13 +293,18 @@ def fit(model: DelayCASTNet, train_ds: TrialDataset, val_ds: TrialDataset, cfg: 
             pr = predict(model, val_loader, device)
             row["val_bacc"] = balanced_accuracy(pr["labels"], pr["logits"].argmax(1))
             row["val_acc"] = float((pr["labels"] == pr["logits"].argmax(1)).mean())
-            row["val_loss"] = validation_loss(model, val_loader, cfg, cw, device)
-            score = row["val_bacc"] if cfg.train.get_path("select_by", "val_loss") == "val_bacc" else -row["val_loss"]
+            row["val_loss"], row["val_ce"] = validation_loss(model, val_loader, cfg, cw, device)
+            select_by = str(cfg.train.get_path("select_by", "val_ce"))
+            # val_ce (default): the checkpoint with the best classification cross-entropy - the multi-task loss is
+            # dominated by the Poisson term late in training and can pick a checkpoint that trades accuracy for
+            # forecast likelihood; val_loss: the joint optimum; val_bacc: balanced accuracy (noisy on small splits).
+            score = row["val_bacc"] if select_by == "val_bacc" else (-row["val_ce"] if select_by == "val_ce" else -row["val_loss"])
         else:
             score = -row["loss"]
         history.append(row)
-        log.info("[%s] ep %3d loss %.3f ce %.3f pois %.3f gate %.3f | val loss %.3f bacc %.3f (%.1fs)", tag, ep + 1, row["loss"],
-                 row["ce"], row["poisson"], row["gate"], row.get("val_loss", float("nan")), row.get("val_bacc", float("nan")), row["sec"])
+        log.info("[%s] ep %3d loss %.3f ce %.3f pois %.3f gate %.3f | val loss %.3f ce %.3f bacc %.3f (%.1fs)", tag, ep + 1, row["loss"],
+                 row["ce"], row["poisson"], row["gate"], row.get("val_loss", float("nan")), row.get("val_ce", float("nan")),
+                 row.get("val_bacc", float("nan")), row["sec"])
         if score > best + 1e-4:
             best, bad = score, 0
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
@@ -328,10 +339,17 @@ def _check_training_set(train_ds: TrialDataset, val_ds: TrialDataset, splits: di
                            f"over {len(train_sessions)} session(s); see `python -m delaycast cache` drop reasons.")
 
 
-def build_model(cfg: Config, tensors: list[SessionTensors], device) -> DelayCASTNet:
+def build_model(cfg: Config, tensors: list[SessionTensors], device, splits: dict | None = None) -> DelayCASTNet:
     t_ctx = tensors[0].x[REGIONS[0]].shape[2]
     t_tgt = tensors[0].y[REGIONS[0]].shape[2]
     model = DelayCASTNet([t.session for t in tensors], int(cfg.selection.top_k_per_region), t_ctx, t_tgt, cfg)
+    # Standardisation of the linear count read-out: training (+ adaptation) trials of every session only - never a
+    # test trial.  Without splits (a re-loaded run) the buffers come from the checkpoint.
+    if splits is not None:
+        for t in tensors:
+            idx = fit_trials(splits[t.session]) if t.session in splits else np.arange(t.n_trials)
+            if len(idx):
+                model.fit_count_stats(t.session, {r: t.x[r][idx] for r in REGIONS})
     return model.to(device)
 
 
@@ -398,9 +416,11 @@ def run_training(cfg: Config, mode: str = "criteria", out_dir: Path | None = Non
     train_ds = TrialDataset(tensors, {s: v["train"] for s, v in splits.items() if len(v["train"])})
     val_ds = TrialDataset(tensors, {s: v["val"] for s, v in splits.items() if len(v["val"])})
     _check_training_set(train_ds, val_ds, splits, held=_as_list(holdout))
-    model = build_model(cfg, tensors, device)
-    log.info("model parameters: %.2fM (receptive field %d bins, %d transformer blocks, spectral branch: %s)",
-             sum(p.numel() for p in model.parameters()) / 1e6, model.tcn.receptive_field, len(model.temporal_attn), model.spectral_branch)
+    model = build_model(cfg, tensors, device, splits=splits)
+    log.info("model parameters: %.2fM (receptive field %d bins, %d transformer blocks, spectral branch: %s, classifier: %s)",
+             sum(p.numel() for p in model.parameters()) / 1e6, model.tcn.receptive_field, len(model.temporal_attn), model.spectral_branch,
+             "backbone + linear count read-out" if (model.linear_skip and model.classifier_from_backbone)
+             else ("linear count read-out only" if model.linear_skip else "backbone only"))
     hist = fit(model, train_ds, val_ds, cfg, device, tag=f"{mode}")
     hist.to_csv(out_dir / "history.csv", index=False)
 

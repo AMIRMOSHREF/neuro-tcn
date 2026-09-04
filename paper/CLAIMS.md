@@ -15,7 +15,9 @@ passed the stability rule (K<sub>eff</sub> = 0 in every region) is a selection f
 excluded from the paired comparisons and listed in the report header. Where both arms have per-trial predictions the
 report also states in how many sessions the prediction **replicates** on the session's own test trials (trial
 bootstrap of matched trials, averaged over seeds) — supplementary evidence for small corpora that never changes a
-verdict.
+verdict. Where a `Data` session matches a `Data2` audited log by trial numbers, the report also splits the criteria
+run's Left/Right accuracy by behavioural outcome (hit / miss), because a decoder of the upcoming *action* is expected
+to fail more often on trials in which the animal licked against the instruction.
 
 ## The claim
 
@@ -38,7 +40,7 @@ verdict.
 | id | prediction | comparator | statistic (per session, then across sessions) | fails if |
 |---|---|---|---|---|
 | **P1a** sparsity | linear decoder on the train-selected K units ≥ tuned linear decoder on all units | `logreg_selected_units` vs `logreg_all_units` (both in every run's `baselines`) | paired Δ balanced accuracy (Left/Right and 3-class) | CI of Δ includes −0.02 |
-| **P1b** temporal / non-linear gain | DelayCAST on the selected K ≥ linear decoder on the selected K | `criteria` run vs `logreg_selected_units` | paired Δ balanced accuracy | CI of Δ includes 0 |
+| **P1b** temporal / non-linear gain | DelayCAST on the selected K ≥ linear decoder on the selected K; the within-pipeline ablations `criteria_linonly` (linear count read-out alone) and `criteria_noskip` (deep path alone) are reported next to it | `criteria` run vs `logreg_selected_units` | paired Δ balanced accuracy | CI of Δ includes 0 |
 | **P2** not just loud units | criteria > rate-matched K<sub>eff</sub> > random K<sub>eff</sub> (same number of units per session × region) | `criteria` vs `rate` vs `random` runs (same seeds/splits) | paired Δ Left/Right balanced accuracy (3-class as fallback), both contrasts | either CI includes 0 |
 | **P3** late-delay sufficiency | τ<sub>95</sub> ≤ 500 ms for the model (bootstrap CI upper bound, full-context accuracy above chance) and for the linear all-unit sweep; masking the last window of the delay (200 ms, zero occlusion = the training-time window dropout) costs more than masking any earlier window | context sweep, `csi`, `tau95_linear_ms`, `temporal_occlusion` | CI upper bound of τ<sub>95</sub>; paired Δ(last window) − min Δ(earlier windows) | model at chance, upper CI > 500 ms, linear τ<sub>95</sub> > 500 ms, or an earlier window costs as much |
 | **P4** delay → response coupling | forecast Poisson deviance explained of the model > 0 (relative to the training-PSTH null); persistence and the class-conditional oracle (mean response PSTH of the true class) reported, with the number of sessions in which the model beats the oracle; units with C over-represented among selected vs eligible-unselected | `forecast` per session; selection tables | per-session deviance explained vs 0; Fisher exact per session + sign test | CI includes 0 |

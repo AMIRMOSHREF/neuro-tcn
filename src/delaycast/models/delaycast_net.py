@@ -25,6 +25,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -44,6 +45,8 @@ class ModelOutput:
     gates: dict[str, torch.Tensor]              # region -> (K,) neuron gates of the batch's session
     gate_penalty: torch.Tensor                  # sparsity penalty (mean over regions)
     spec: dict[str, torch.Tensor]               # region -> (B, n_spec, T) causal band power actually used
+    logits_backbone: torch.Tensor | None = None  # (B, 3) contribution of the TCN/Transformer path (None when off)
+    logits_skip: torch.Tensor | None = None      # (B, 3) contribution of the linear count read-out (None when off)
 
 
 class NormalizedReadIn(nn.Module):
@@ -125,6 +128,31 @@ def time_to_go_encoding(T: int, d: int) -> torch.Tensor:
     return pe * 0.3
 
 
+class CountReadout(nn.Module):
+    """The *wide* path of the classifier: a linear read-out of each selected neuron's mean sqrt-count over the
+    visible context and over the last ``late_bins`` (the same two features per unit as the linear baseline),
+    standardised with statistics of the training trials (buffers set by ``DelayCASTNet.fit_count_stats``) and
+    multiplied by the neuron gates.  Its logits are *added* to the backbone classifier's, so the network contains
+    the tuned linear decoder as a special case and the TCN/Transformer path only has to learn what a linear
+    read-out of mean rates cannot express.  Zero-initialised: at the start the classifier is the backbone alone.
+    """
+
+    def __init__(self, k: int, n_classes: int):
+        super().__init__()
+        self.lin = nn.Linear(2 * k, n_classes)
+        nn.init.zeros_(self.lin.weight)
+        nn.init.zeros_(self.lin.bias)
+        self.register_buffer("mu", torch.zeros(2 * k))
+        self.register_buffer("sd", torch.ones(2 * k))
+
+    def forward(self, feats: torch.Tensor, gates: torch.Tensor, nm: torch.Tensor | None) -> torch.Tensor:  # feats (B, 2K)
+        z = (feats - self.mu) / self.sd
+        z = z * torch.cat([gates, gates])[None, :]
+        if nm is not None:
+            z = z * torch.cat([nm, nm], dim=1)
+        return self.lin(z)
+
+
 class SessionAdapter(nn.Module):
     """Session-specific read-in / gates / read-out for the four regions."""
 
@@ -132,6 +160,7 @@ class SessionAdapter(nn.Module):
         super().__init__()
         self.gates = nn.ModuleDict({r: NeuronGate(k, init=1.0) for r in REGIONS})
         self.read_in = nn.ModuleDict({r: NormalizedReadIn(k + n_spec, d_model) for r in REGIONS})
+        self.skip = nn.ModuleDict({r: CountReadout(k, len(CLASSES)) for r in REGIONS})
         self.read_out = nn.ModuleDict({r: nn.Linear(d_model, k) for r in REGIONS})
         self.log_base = nn.ParameterDict({r: nn.Parameter(torch.zeros(k)) for r in REGIONS})
         # Persistence path: weight of each neuron's own late-delay log-rate in its response forecast.  This
@@ -177,6 +206,36 @@ class DelayCASTNet(nn.Module):
         self.decoder = DilatedCausalTCN(d, d, 3, int(m.kernel_size), float(m.dropout))
         self.gate_penalty_type = str(m.get_path("neuron_gate_penalty", "hoyer"))
         self.gate_weight = float(m.get_path("neuron_gate_weight", m.get_path("neuron_gate_l1", 0.01)))
+        # ---- classifier paths: backbone (TCN -> Transformer -> pooling -> cross-region) and/or the linear count read-out
+        self.linear_skip = bool(m.get_path("linear_skip", True))
+        self.classifier_from_backbone = bool(m.get_path("classifier_from_backbone", True))
+        if not (self.linear_skip or self.classifier_from_backbone):
+            raise ValueError("model.linear_skip and model.classifier_from_backbone cannot both be false")
+
+    # ------------------------------------------------------------------ count read-out statistics
+    @staticmethod
+    def count_features(x: torch.Tensor, valid: torch.Tensor, late_bins: int) -> torch.Tensor:
+        """(B, 2K): masked mean sqrt-count of every unit over the visible context and over its last ``late_bins``."""
+        sq = torch.sqrt(x)
+        f_all = (sq * valid[:, None, :]).sum(-1) / valid.sum(-1, keepdim=True).clamp(min=1)
+        v_late = valid[:, -late_bins:]
+        f_late = (sq[:, :, -late_bins:] * v_late[:, None, :]).sum(-1) / v_late.sum(-1, keepdim=True).clamp(min=1)
+        return torch.cat([f_all, f_late], dim=1)
+
+    @torch.no_grad()
+    def fit_count_stats(self, session: str, x: dict[str, np.ndarray | torch.Tensor]) -> None:
+        """Standardisation of the count read-out from the given trials (training / adaptation trials only)."""
+        ad: SessionAdapter = self.adapters[_key(session)]
+        for r in REGIONS:
+            xr = torch.as_tensor(np.asarray(x[r]), dtype=torch.float32)
+            if xr.ndim != 3 or xr.shape[0] == 0:
+                continue
+            valid = torch.ones(xr.shape[0], xr.shape[2])
+            f = self.count_features(xr, valid, self.late_bins)
+            mu, sd = f.mean(0), f.std(0, unbiased=False)
+            sd = torch.where(sd > 1e-6, sd, torch.ones_like(sd))
+            ad.skip[r].mu.copy_(mu.to(ad.skip[r].mu.device))
+            ad.skip[r].sd.copy_(sd.to(ad.skip[r].sd.device))
 
     # ------------------------------------------------------------------ session handling
     def add_session(self, session: str) -> None:
@@ -212,12 +271,15 @@ class DelayCASTNet(nn.Module):
         valid = torch.ones(B, T, device=ref.device, dtype=ref.dtype) if pad_mask is None else (~pad_mask).to(ref.dtype)
         tokens, tattn, sattn, gates, late_log, spec_used = [], {}, {}, {}, {}, {}
         penalty = torch.zeros((), device=ref.device)
+        skip_logits = torch.zeros(B, len(CLASSES), device=ref.device, dtype=ref.dtype)
         lb = self.late_bins
         for r in REGIONS:
             xr_raw = x[r]
             nm = None if neuron_mask is None else neuron_mask[r].to(ref.dtype)                      # (B, K)
             if drop_region == r:
                 xr_raw = torch.zeros_like(xr_raw)
+            if self.linear_skip:   # wide path: gated, standardised mean counts of the visible context (drop = zero input)
+                skip_logits = skip_logits + ad.skip[r](self.count_features(xr_raw, valid, lb), ad.gates[r].gates(), nm)
             # Persistence input: masked mean count of the last ``lb`` valid bins.
             v_late = valid[:, None, -lb:]
             late = (xr_raw[:, :, -lb:] * v_late).sum(-1) / v_late.sum(-1).clamp(min=1)
@@ -246,7 +308,8 @@ class DelayCASTNet(nn.Module):
             penalty = penalty + (ad.gates[r].hoyer(gm) if self.gate_penalty_type == "hoyer" else ad.gates[r].l1())
         tokens = torch.stack(tokens, dim=1)                  # (B, R, D)
         fused, region_tokens, _, w_region = self.cross(tokens)
-        logits = self.classifier(fused)
+        logits_bb = self.classifier(fused) if self.classifier_from_backbone else None
+        logits = (logits_bb if logits_bb is not None else 0) + (skip_logits if self.linear_skip else 0)
         forecast = {}
         for i, r in enumerate(REGIONS):
             z = torch.cat([fused, region_tokens[:, i]], dim=-1)           # (B, 2D)
@@ -254,7 +317,8 @@ class DelayCASTNet(nn.Module):
             z = self.decoder(z.transpose(1, 2)).transpose(1, 2)          # (B, T_tgt, D)
             persist = (ad.persist[r][None] * late_log[r])[:, None, :]              # (B, 1, K)
             forecast[r] = (ad.read_out[r](z) + ad.log_base[r] + persist).transpose(1, 2)  # (B, K, T_tgt) log-rate
-        return ModelOutput(logits, forecast, tattn, sattn, w_region, gates, penalty / len(REGIONS), spec_used)
+        return ModelOutput(logits, forecast, tattn, sattn, w_region, gates, penalty / len(REGIONS), spec_used,
+                           logits_bb, skip_logits if self.linear_skip else None)
 
 
 def _key(session: str) -> str:

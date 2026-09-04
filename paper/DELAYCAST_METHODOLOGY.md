@@ -145,8 +145,19 @@ Design choices that make the method testable:
    the model transfers across context lengths.
 5. **Interventions are in-distribution.** Training uses prefix-context, random-window and region dropout, so the
    test-time context sweep, window occlusion and region drop are patterns the network has seen.
-6. **Multi-task objective** `CE(class) + λ · PoissonNLL(response counts) + μ · Hoyer(gates)` with a persistence path
+6. **Wide-and-deep classifier.** The class logits are the sum of two paths: the *deep* path (TCN → Transformer →
+   attention pooling → cross-region attention → linear head) and a *wide* path — a session-specific linear read-out
+   of each selected unit's mean √count over the visible context and over its last 200 ms (the two features of the
+   linear baseline), standardised on the training trials and multiplied by the same neuron gates. The network
+   therefore contains the tuned linear decoder on the same units as a special case and the deep path only has to
+   add what a linear read-out of mean rates cannot express. The ablations `linonly` (wide path alone) and `noskip`
+   (deep path alone) are trained in the same pipeline and reported next to P1b. Added after the first real-data run,
+   in which the deep path alone was 0.8 points below logistic regression on the same units.
+7. **Multi-task objective** `CE(class) + λ · PoissonNLL(response counts) + μ · Hoyer(gates)` with a persistence path
    (each neuron's late-delay log-rate seeds its own forecast) so the decoder learns deviations from persistence.
+   The checkpoint is the epoch with the lowest class-weighted validation cross-entropy (`train.select_by: val_ce`);
+   the multi-task loss is dominated by the Poisson term late in training and can select a checkpoint that trades
+   accuracy for forecast likelihood. μ = 0.1 (0.5 pushed the gates of the already sparse selected set to ≈ 0.68).
 7. **Session adapters + shared backbone**: read-in, gates and read-out are session-specific; TCN, Transformer,
    attention and heads are shared across all sessions of both datasets — joint training on `Data` and `Data2`, and
    adapter-only transfer to held-out sessions / datasets.

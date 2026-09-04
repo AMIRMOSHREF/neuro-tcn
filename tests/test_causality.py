@@ -301,3 +301,56 @@ def test_model_output_shapes(model, x):
         assert out.gates[r].shape == (K,)
         assert out.spec[r].shape == (B, model.n_spec, T_CTX)
     assert np.isfinite(out.logits.numpy()).all()
+
+
+# ----------------------------------------------------------------------------- linear count read-out (wide path)
+def test_linear_count_readout_paths(cfg, x):
+    """The classifier is backbone + linear count read-out; each path can be switched off, the read-out is
+    standardised on the given trials, ignores masked bins and padded units, and a dropped region equals a zeroed
+    input on both paths."""
+    from delaycast.config import load_config
+    torch.manual_seed(0)
+    m = DelayCASTNet([SESSION], K, T_CTX, T_TGT, cfg).eval()
+    assert m.linear_skip and m.classifier_from_backbone
+    m.fit_count_stats(SESSION, {r: x[r].numpy() for r in REGIONS})
+    ad = m.adapters[SESSION.replace("/", "__")]
+    f = m.count_features(x["ALM_L"], torch.ones(B, T_CTX), m.late_bins)
+    z = (f - ad.skip["ALM_L"].mu) / ad.skip["ALM_L"].sd
+    assert torch.allclose(z.mean(0), torch.zeros(2 * K), atol=1e-4) and torch.allclose(z.std(0, unbiased=False), torch.ones(2 * K), atol=1e-3)
+    with torch.no_grad():
+        # zero-initialised read-out: at init the logits are the backbone's
+        out = m(x, SESSION)
+        assert out.logits_backbone is not None and out.logits_skip is not None
+        assert torch.allclose(out.logits, out.logits_backbone, atol=ATOL) and float(out.logits_skip.abs().max()) == 0.0
+        for p in ad.skip.parameters():
+            p.add_(0.5 * torch.randn_like(p))
+        out = m(x, SESSION)
+        assert torch.allclose(out.logits, out.logits_backbone + out.logits_skip, atol=ATOL)
+        assert float(out.logits_skip.abs().max()) > 0.0
+        # masked bins do not reach the read-out; a padded unit contributes nothing
+        pm = torch.zeros(B, T_CTX, dtype=torch.bool)
+        pm[:, :60] = True
+        x2 = {r: v.clone() for r, v in x.items()}
+        x2["ALM_L"][:, :, :60] += 5.0
+        assert torch.allclose(m(x, SESSION, pad_mask=pm).logits_skip, m(x2, SESSION, pad_mask=pm).logits_skip, atol=ATOL)
+        nm = {r: torch.ones(B, K, dtype=torch.bool) for r in REGIONS}
+        nm["STR_R"][:, 0] = False
+        x3 = {r: v.clone() for r, v in x.items()}
+        x3["STR_R"][:, 0] += 7.0
+        assert torch.allclose(m(x, SESSION, neuron_mask=nm).logits_skip, m(x3, SESSION, neuron_mask=nm).logits_skip, atol=ATOL)
+        # region drop == zeroed input on the whole classifier
+        x0 = {r: v.clone() for r, v in x.items()}
+        x0["ALM_R"].zero_()
+        assert torch.allclose(m(x, SESSION, drop_region="ALM_R").logits, m(x0, SESSION).logits, atol=ATOL)
+    # variants
+    c1 = load_config(None); c1.set_path("model.linear_skip", False)
+    m1 = DelayCASTNet([SESSION], K, T_CTX, T_TGT, c1).eval()
+    c2 = load_config(None); c2.set_path("model.classifier_from_backbone", False)
+    m2 = DelayCASTNet([SESSION], K, T_CTX, T_TGT, c2).eval()
+    with torch.no_grad():
+        o1, o2 = m1(x, SESSION), m2(x, SESSION)
+    assert o1.logits_skip is None and torch.allclose(o1.logits, o1.logits_backbone, atol=ATOL)
+    assert o2.logits_backbone is None and torch.allclose(o2.logits, o2.logits_skip, atol=ATOL)
+    c3 = load_config(None); c3.set_path("model.linear_skip", False); c3.set_path("model.classifier_from_backbone", False)
+    with pytest.raises(ValueError):
+        DelayCASTNet([SESSION], K, T_CTX, T_TGT, c3)

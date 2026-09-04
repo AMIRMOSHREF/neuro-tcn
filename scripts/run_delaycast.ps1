@@ -34,7 +34,7 @@ Step "select"  (@("select") + $common)
 if ($Quick) {
     Step "train (quick)" (@("train", "--modes", "criteria,rate,random", "--seeds", "0") + $common)
 } else {
-    Step "train within-session" (@("train", "--modes", "criteria,rate,random", "--variants", "popmean", "--seeds", $Seeds) + $common)
+    Step "train within-session" (@("train", "--modes", "criteria,rate,random", "--variants", "popmean,linonly,noskip", "--seeds", $Seeds) + $common)
     Step "train cross-dataset"  (@("train", "--modes", "criteria,random", "--seeds", "0", "--set", "train.eval_mode=cross_dataset") + $common)
     Step "negative control"     (@("train", "--modes", "criteria", "--seeds", "0", "--negative-control") + $common)
 }

@@ -526,6 +526,15 @@ def _p1(runs: dict) -> tuple[dict, dict]:
            "comparator": "run criteria vs baseline logreg_selected_units",
            "statistic": f"paired {b.get('metric') or 'balanced_accuracy_lr'} difference, non-inferiority margin {NOT_LOWER_MARGIN}",
            "comparison": b, "verdict": b["verdict"], "failure_condition": b["failure_condition"], "result": _summary_line(b)}
+    # Within-pipeline ablations (reported, no verdict): the full classifier (backbone + linear count read-out) against
+    # the linear read-out alone and against the backbone alone, trained with the same splits, selection and augmentation.
+    abl = {}
+    for name in ("criteria_linonly", "criteria_noskip"):
+        if runs.get(name):
+            abl[name] = compare_arms(crit, runs.get(name), metrics, ">", "criteria", name, exclude=excl, replication=True)
+    if abl:
+        p1b["ablations"] = abl
+        p1b["result"] += " || " + " || ".join(f"vs {k}: {_summary_line(v)}{_replication_line(v)}" for k, v in abl.items())
     return p1a, p1b
 
 
@@ -938,6 +947,83 @@ def _p8(runs: dict) -> dict:
 # ----------------------------------------------------------------------------------------------------------
 
 
+def outcome_diagnostic(cfg, runs: dict) -> dict:
+    """Left/Right accuracy of the criteria run split by the audited behavioural outcome (hit = licked the instructed
+    side, miss = licked the other side).
+
+    ``Data`` carries no log, but three of its sessions are the same recordings as ``Data2`` sessions, whose audited
+    logs have ``outcome`` and ``trial_instruction`` per trial number.  A ``Data`` session is matched to a ``Data2``
+    log when the set of trial numbers in its cache equals the set of NPZ trial numbers of that ``Data2`` session.
+    A decoder of the *upcoming action* is expected to be less accurate on miss trials (the delay activity partly
+    follows the instruction before the animal changes its mind), so the split says how much of the remaining error
+    is behavioural rather than a decoding failure.  Reported only; no verdict."""
+    out: dict[str, Any] = {"available": False, "sessions": {}, "note": ""}
+    crit = runs.get("criteria")
+    if not crit or cfg is None:
+        return out
+    try:
+        from .data.cache import _cache_key
+        from .data.discovery import discover_dataset_b
+        cache_dir = Path(cfg.data.cache_dir) / _cache_key(cfg)
+        recs_b = discover_dataset_b(cfg.data.data_b_root) if bool(cfg.data.get_path("use_dataset_b", True)) else []
+    except Exception as e:  # pragma: no cover
+        out["note"] = f"could not read the Data2 logs: {e}"
+        return out
+    by_b: dict[str, dict[int, dict]] = {}
+    for r in recs_b:
+        if r.csv:
+            by_b.setdefault(r.session, {})[int(r.trial)] = r.csv
+    trials_b = {s: set(d) for s, d in by_b.items()}
+    # pooled predictions of every seed of the criteria run
+    preds = []
+    for res in crit:
+        f = Path(res.get("_run_dir", "")) / "test_predictions.csv"
+        if f.is_file():
+            try:
+                df = pd.read_csv(f)
+                df["seed"] = int(res.get("seed", 0))
+                preds.append(df)
+            except Exception:  # pragma: no cover
+                continue
+    if not preds:
+        out["note"] = "no test_predictions.csv"
+        return out
+    pred = pd.concat(preds, ignore_index=True)
+    left, right = CLASSES.index("Left"), CLASSES.index("Right")
+    pooled = {"hit": [0, 0], "miss": [0, 0]}
+    for sess in sorted(pred.session.unique()):
+        meta = cache_dir / (str(sess).replace("/", "__") + ".meta.csv")
+        if not meta.is_file():
+            continue
+        try:
+            all_trials = set(pd.read_csv(meta, usecols=["trial"]).trial.astype(int))
+        except Exception:  # pragma: no cover
+            continue
+        if str(sess).startswith("B/"):
+            match = str(sess) if str(sess) in by_b else None
+        else:
+            match = next((sb for sb, ts in trials_b.items() if ts == all_trials), None)
+        if match is None:
+            continue
+        rows = by_b[match]
+        p = pred[(pred.session == sess) & pred.label.isin([left, right])].copy()
+        p["outcome"] = [str(rows.get(int(t), {}).get("outcome", "")).strip().lower() for t in p.trial]
+        p["correct"] = (p.pred == p.label).astype(int)
+        entry = {"matched_log": match}
+        for oc in ("hit", "miss"):
+            q = p[p.outcome == oc]
+            entry[oc] = {"n": int(len(q)), "accuracy": _finite(q.correct.mean()) if len(q) else math.nan}
+            pooled[oc][0] += int(q.correct.sum())
+            pooled[oc][1] += int(len(q))
+        out["sessions"][str(sess)] = entry
+    if out["sessions"]:
+        out["available"] = True
+        out["pooled"] = {oc: {"n": n, "accuracy": (k / n if n else math.nan)} for oc, (k, n) in pooled.items()}
+    else:
+        out["note"] = "no Data session matches a Data2 log by trial numbers"
+    return out
+
+
 def _all_sessions(runs: dict, summary: pd.DataFrame | None) -> list[str]:
     s: set[str] = set()
     for arm in runs.values():
@@ -1125,6 +1211,15 @@ def render_markdown(report: dict) -> str:
     if h.get("empty_criteria_sessions"):
         L.append(f"\n**Sessions with an empty criteria set** (no unit passed the stability rule; excluded from every criteria-arm "
                  f"comparison below, listed here instead): {', '.join(h['empty_criteria_sessions'])}\n")
+    oc = report.get("outcome") or {}
+    if oc.get("available"):
+        L.append("\nLeft/Right accuracy of the criteria run by audited behavioural outcome (Data sessions matched to a Data2 log by "
+                 "trial numbers; hit = licked the instructed side, miss = licked the other side; pooled over seeds):\n")
+        rows = [[s, v["matched_log"], v["hit"]["n"], _fmt(v["hit"]["accuracy"]), v["miss"]["n"], _fmt(v["miss"]["accuracy"])] for s, v in oc["sessions"].items()]
+        pl = oc.get("pooled", {})
+        rows.append(["**all**", "", pl.get("hit", {}).get("n"), _fmt(pl.get("hit", {}).get("accuracy")), pl.get("miss", {}).get("n"), _fmt(pl.get("miss", {}).get("accuracy"))])
+        L.append(_md_table(["session", "Data2 log", "n hit", "accuracy (hit)", "n miss", "accuracy (miss)"], rows))
+        L.append("")
     L.append("\n## 2. The claim and the verdicts\n")
     L.append(f"> {report['claim']}\n")
     L.append(f"Statistical rule: per-session paired differences (mean over seeds per session first), Wilcoxon signed-rank across sessions "
@@ -1144,6 +1239,12 @@ def render_markdown(report: dict) -> str:
         if pid == "P0":
             L.append(_md_table(["seed", "balanced accuracy", "chance mean", "chance p95", "pass"],
                                [[r["seed"], _fmt(r["balanced_accuracy"]), _fmt(r["chance_mean"]), _fmt(r["chance_p95"]), r["pass"]] for r in p.get("per_seed", [])]))
+        elif pid == "P1b" and p.get("ablations"):
+            L.append(_comparison_md(p.get("comparison")))
+            for k, c in p["ablations"].items():
+                L.append(f"\n**within-pipeline ablation: criteria vs {k}** (reported, no verdict; {k} = "
+                         + ("the linear count read-out alone" if k.endswith("linonly") else "the backbone classifier alone") + ")\n\n"
+                         + _comparison_md(c, "criteria (full)", k))
         elif pid == "P2":
             for k, c in p.get("comparisons", {}).items():
                 L.append(f"**criteria vs {k}**\n\n" + _comparison_md(c, "criteria", k))
@@ -1228,7 +1329,7 @@ def build_report(cfg, out_dir: Path) -> dict:
         except Exception:  # pragma: no cover
             summary = None
     report = {"out_dir": str(out_dir), "claim": CLAIM, "header": _header(runs, summary), "predictions": evaluate_predictions(runs),
-              "selection": _selection_summary(out_dir, runs),
+              "selection": _selection_summary(out_dir, runs), "outcome": outcome_diagnostic(cfg, runs),
               "rule": {"alpha": ALPHA, "not_lower_margin": NOT_LOWER_MARGIN, "n_bootstrap": N_BOOT, "min_sessions": MIN_SESSIONS}}
     report["verdicts"] = {k: v["verdict"] for k, v in report["predictions"].items()}
     return report

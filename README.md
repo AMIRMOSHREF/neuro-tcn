@@ -153,6 +153,31 @@ The synthetic tree mirrors both layouts and NPZ schemas; example figures made fr
 | `figures/fig2_…`, `fig3_attention.png`, `fig4_results.png` | time–frequency, attention + occlusion + importance agreement, results |
 | `REPORT.md`, `report.json` | verdict per prediction with numbers, CIs, n sessions |
 
+## What the model is, how accurate it is, and how to make it more accurate
+
+**Model** (`src/delaycast/models/delaycast_net.py`, ≈ 0.4 M parameters): per session, the K ≤ 32 selected units of
+each region enter through a neuron gate and a normalised read-in; a dilated causal TCN (5 blocks, kernel 3, receptive
+field 125 bins = the whole 1.2 s delay) and two causal Transformer blocks with a fixed time-to-go encoding produce
+per-bin features; attention pooling over time and cross-region attention give one fused token; the class logits are
+the sum of the head on that token (deep path) and a session-specific linear read-out of every unit's mean counts
+(wide path, so the model contains the linear decoder); a Poisson decoder forecasts each unit's response-epoch counts
+from the same token plus a persistence path; a causal Gabor filterbank of the gated population rate is the
+spectro-temporal branch.
+
+**Accuracy on the four `Data` sessions** (3 seeds, test trials never used for selection or training; chance ≈ 0.62):
+Left/Right balanced accuracy 0.968 / 0.956 / 0.878 on Sessions 2–4 with ≈ 90–104 selected units out of ≈ 2,000
+(Session 1 selects no unit). Logistic regression on the same units reaches 0.975 / 0.960 / 0.891, on **all** units
+0.986 / 0.970 / 0.941. Those all-unit numbers are the information ceiling of the recordings: no architecture can
+decode a trial whose delay activity does not carry the upcoming lick side, and part of the residual error is
+behavioural (the report splits accuracy by hit / miss where a log exists).
+
+**Levers, in order of effect**: (1) more recordings — every verdict needs ≥ 5 sessions and the shared backbone
+improves with trials (`Data2` re-export); (2) more units — `selection.top_k_per_region` (64, 128) with
+`selection.fill_unstable: true` trades the sparsity claim for accuracy towards the all-unit ceiling; (3) the wide path
+and CE checkpointing (defaults since the first run) close the gap to the linear decoder on the same units; (4) seeds
+average out split noise but do not raise a single run. Nothing else in the architecture is expected to move the
+number by more than a point on this corpus.
+
 ## Protocol revisions after the first real-data run
 
 The first report on the four `Data` sessions changed four rules; every one is documented in
@@ -166,7 +191,10 @@ The first report on the four `Data` sessions changed four rules; every one is do
 * **temporal occlusion masks the window** (`evaluate.occlusion: zero`), the same intervention as the training-time
   window dropout; the permutation variant stays available;
 * **P4 is tested against the units' mean response** (deviance explained > 0); persistence and the class-conditional
-  oracle are reported next to it.
+  oracle are reported next to it;
+* **wide-and-deep classifier** (`model.linear_skip`): a gated, standardised mean-count read-out is added to the
+  backbone logits, checkpoints are chosen by validation cross-entropy (`train.select_by: val_ce`) and the gate penalty
+  is 0.1; the ablations `linonly` / `noskip` are part of the protocol.
 
 The report also excludes sessions with an empty criteria set from criteria-arm comparisons (listed in its header,
 with K<sub>eff</sub> per session), prints, per comparison, in how many sessions the prediction replicates on the
