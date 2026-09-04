@@ -169,8 +169,11 @@ The first report on the four `Data` sessions changed four rules; every one is do
   oracle are reported next to it.
 
 The report also excludes sessions with an empty criteria set from criteria-arm comparisons (listed in its header,
-with K<sub>eff</sub> per session) and prints, per comparison, in how many sessions the prediction replicates on the
-session's own test trials.
+with K<sub>eff</sub> per session), prints, per comparison, in how many sessions the prediction replicates on the
+session's own test trials, tests P2 / P7 on Left/Right balanced accuracy (the claim's metric; with a handful of Ignore
+test trials each one moves the 3-class score by several points), shows both region-ablation methods for P5a, and
+reports the number of units the selection rule would pick with permuted labels as the empirical false-selection
+estimate.
 
 ## The figure (what the gold-coloured rows mean)
 

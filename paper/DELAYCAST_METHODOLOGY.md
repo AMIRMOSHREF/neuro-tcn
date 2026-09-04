@@ -99,8 +99,10 @@ no direction information, which is what a rate-matched control set is. Held-out 
 stratified half-subsamples (without replacement) of the fit trials; a unit's *stability* is its selection frequency.
 The final selection takes the eligible units with stability ≥ 0.6, ranked by (stability, score), top-K = 32 per
 region; regions with fewer stable units keep K<sub>eff</sub> < K (zero-padded). The expected number of false
-selections is bounded by E[V] ≤ K² / ((2·0.6 − 1)·n<sub>eligible</sub>) (written to `selection_funnel.csv`), and
-`delaycast select` also reports the stability that label-permuted data produce. Pairwise φ coefficients between
+selections is bounded by E[V] ≤ K² / ((2·0.6 − 1)·n<sub>eligible</sub>) (written to `selection_funnel.csv`; informative
+only when K<sub>eff</sub> ≪ n<sub>eligible</sub>, which real sessions violate), and `delaycast select` also reports what
+label-permuted data produce: the median stability of the top-K units and the number of units the full rule would select
+— the empirical false-selection estimate (on the four `Data` sessions: null stability 0.14, 0 units). Pairwise φ coefficients between
 S/C/W/R flags say how independent the evidence is.
 
 Every unit receives a `reasons` sentence (fit-trial counts per class, class-conditional rates, direction and effect
@@ -160,7 +162,9 @@ Everything is inference-only on the test trials; all quantities are stored per s
   intervention as the training-time window dropout, so the occluded input is in-distribution; the permutation variant
   (window replaced by the same window of another test trial) is available as `permute`. Δ balanced accuracy, Δ log-loss
   and Δ forecast deviance (backbone-only variant with the persistence input held fixed).
-* **Region ablation**: permutation of a whole region and in-distribution region drop.
+* **Region ablation**: in-distribution region drop (primary for P5a: the network was trained with region dropout, so
+  it measures whether a region is *needed*) and permutation of the whole region (reported: how much the trained
+  model *relies* on it; larger, because a permuted region is out of distribution). Both are always computed.
 * **Neuron importance**: permutation occlusion of every selected neuron → Δ log-loss, Δ balanced accuracy, Δ forecast
   deviance of the *other* neurons; joined with gates and criteria (`neuron_importance.csv`); agreement summarised
   within session × region (Spearman ρ, sign test across cells).

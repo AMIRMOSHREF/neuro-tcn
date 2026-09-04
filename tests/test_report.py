@@ -21,8 +21,9 @@ from delaycast.config import load_config
 SESSIONS = ["A/Session1", "A/Session2", "B/sub-100001_ses-20190101T100000", "B/sub-100001_ses-20190102T100000",
             "B/sub-100002_ses-20190103T100000", "B/sub-100003_ses-20190104T100000"]
 CRIT = [0.85, 0.88, 0.82, 0.90, 0.86, 0.84]
+LIN_SEL = [0.90, 0.91, 0.89, 0.90, 0.92, 0.90]      # criteria run: per-session Left/Right accuracy (P1b) = the P2 metric
 RATE_LOW = [0.60, 0.65, 0.58, 0.62, 0.61, 0.63]
-RATE_MIXED = [c + d for c, d in zip(CRIT, [0.02, -0.02, 0.03, -0.03, 0.01, -0.01])]
+RATE_MIXED = [c + d for c, d in zip(LIN_SEL, [0.02, -0.02, 0.03, -0.03, 0.01, -0.01])]
 RANDOM = [0.50, 0.52, 0.48, 0.51, 0.49, 0.53]
 PREDICTIONS = ("P0", "P1a", "P1b", "P2", "P3", "P4", "P5a", "P5b", "P6", "P7", "P8")
 
@@ -52,7 +53,7 @@ def make_results(bacc: list[float], mode: str, *, chance_p95: float = 0.42, nega
     if not full:
         return res
     lin_all = [0.90] * 6
-    lin_sel = [0.90, 0.91, 0.89, 0.90, 0.92, 0.90]
+    lin_sel = list(LIN_SEL)
     res["baselines"] = [
         {"model": "logreg_all_units", **_cls(0.9), "per_session": _per_session(lin_all)},
         {"model": "logreg_selected_units", **_cls(0.9), "per_session": _per_session(lin_sel)},
@@ -176,7 +177,8 @@ def test_report_supported_scenario(cfg, tmp_path):
         assert c["n_sessions"] == 6 and c["n_seeds"] == 1
         assert c["p"] < 0.05 and c["ci"][0] > 0 and c["verdict"] == "supported"
         assert [r["session"] for r in c["table"]] == sorted(SESSIONS)
-    assert abs(p2["comparisons"]["rate"]["mean_diff"] - (np.mean(CRIT) - np.mean(RATE_LOW))) < 1e-9
+    assert p2["comparisons"]["rate"]["metric"] == "balanced_accuracy_lr"
+    assert abs(p2["comparisons"]["rate"]["mean_diff"] - (np.mean(LIN_SEL) - np.mean(RATE_LOW))) < 1e-9
     # negative control below its chance p95; non-inferiority of the selected-K decoders; the other tests
     assert v["P0"] == "supported"
     assert v["P1a"] == "supported" and v["P1b"] == "supported"

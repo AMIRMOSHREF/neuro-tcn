@@ -549,7 +549,12 @@ def evaluate_run(run: dict, cfg, caches: dict | None = None) -> dict:
     # ---- region ablation: permutation of the whole region and in-distribution region drop
     abl = []
     for r_drop in REGIONS:
-        for method in (["permute", "drop"] if occl == "permute" else ["zero"]):
+        # both are always computed: "drop" is the in-distribution ablation (the network was trained with region
+        # dropout, so a missing region is a pattern it has seen - it measures whether the region is *needed*);
+        # "permute" replaces the region by another trial's activity and measures how much the trained model
+        # *relies* on it.  Robustness training makes the first small even for an informative region, which is why
+        # the report shows both and P5a uses "drop" as the in-distribution primary.
+        for method in ("permute", "drop"):
             lg, per_s = [], {}
             for s, b in tests.items():
                 lab = b["label"].numpy()

@@ -486,6 +486,7 @@ class SelectionResult:
     funnel: pd.DataFrame = field(default_factory=pd.DataFrame)
     trial_idx: np.ndarray | None = None    # trials the criteria were computed on (None = all)
     null_stability: np.ndarray | None = None   # median stability of top-K units under label permutation
+    null_n_selected: np.ndarray | None = None  # units (summed over regions) that would be selected under label permutation
 
     def n_selected(self) -> dict[str, int]:
         return {r: len(v) for r, v in self.selected.items()}
@@ -595,25 +596,31 @@ def select_neurons(cache: SessionCache, cfg, trial_idx: np.ndarray | None = None
 
     n_null = int(sel.get_path("n_null_permutations", 0)) if n_null is None else int(n_null)
     if n_null > 0 and not label_free:
-        res.null_stability = null_stability(cache, cfg, feats, idx, n_null, seed + 1)
+        res.null_stability, res.null_n_selected = null_stability(cache, cfg, feats, idx, n_null, seed + 1)
         funnel["null_median_stability_max"] = float(np.max(res.null_stability)) if res.null_stability.size else np.nan
+        funnel["null_n_selected_mean"] = float(np.mean(res.null_n_selected)) if res.null_n_selected.size else np.nan
     return res
 
 
-def null_stability(cache: SessionCache, cfg, feats: dict[str, RegionFeatures], idx: np.ndarray, n_null: int, seed: int) -> np.ndarray:
-    """Median stability of the top-K units when the class labels are permuted (what 'stable' looks like by chance)."""
+def null_stability(cache: SessionCache, cfg, feats: dict[str, RegionFeatures], idx: np.ndarray, n_null: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """What the selection does when the class labels are permuted: per permutation, the median stability of the
+    top-K eligible units and the number of units (summed over regions) that pass the full rule (eligible AND
+    stability >= min_stability, capped at K per region).  The second number is the empirical false-selection
+    estimate that the Meinshausen-Buehlmann bound cannot give when K_eff is not small against n_eligible."""
     rng = np.random.default_rng(seed)
-    out = []
+    med, n_sel = [], []
+    k = int(cfg.selection.top_k_per_region)
+    min_stab = float(cfg.selection.get_path("min_stability", 0.6))
     for _ in range(n_null):
         perm = cache.labels.copy()
         perm[idx] = rng.permutation(perm[idx])
         df = _flag_and_score(_criteria_table(feats, cache, perm, idx, cfg, full=False, rng=rng), cfg)
         key_pos = {kk: i for i, kk in enumerate(zip(df.region, df.unit_index))}
         df["stability"], _ = stability_frequencies(cache, cfg, feats, perm, idx, key_pos, rng)
-        top = pd.concat([df[(df.region == r) & df.eligible].sort_values(["stability", "score"], ascending=False).head(int(cfg.selection.top_k_per_region))
-                         for r in REGIONS])
-        out.append(float(top.stability.median()) if len(top) else 0.0)
-    return np.asarray(out)
+        top = pd.concat([df[(df.region == r) & df.eligible].sort_values(["stability", "score"], ascending=False).head(k) for r in REGIONS])
+        med.append(float(top.stability.median()) if len(top) else 0.0)
+        n_sel.append(int(sum(min(k, int(((df.region == r) & df.eligible & (df.stability >= min_stab)).sum())) for r in REGIONS)))
+    return np.asarray(med), np.asarray(n_sel)
 
 
 def _fmt_q(q) -> str:
@@ -724,6 +731,9 @@ def selection_summary(results: list[SelectionResult]) -> pd.DataFrame:
             row["n_eligible_stab_ge_0.4"] = int((el.stability >= 0.4).sum())
         if res.null_stability is not None and res.null_stability.size:
             row["null_median_stability_max"] = float(np.max(res.null_stability))
+        if res.null_n_selected is not None and res.null_n_selected.size:
+            row["null_n_selected_mean"] = float(np.mean(res.null_n_selected))
+            row["null_n_selected_max"] = int(np.max(res.null_n_selected))
         if len(res.funnel):
             for c in res.funnel.columns:
                 if c.startswith("phi_"):

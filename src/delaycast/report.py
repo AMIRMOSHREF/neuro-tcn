@@ -532,11 +532,11 @@ def _p1(runs: dict) -> tuple[dict, dict]:
 def _p2(runs: dict) -> dict:
     crit = runs.get("criteria")
     excl = empty_criteria_sessions(runs)
-    parts = {name: compare_arms(crit, runs.get(name), "balanced_accuracy", ">", "criteria", name, exclude=excl, replication=True)
+    parts = {name: compare_arms(crit, runs.get(name), ("balanced_accuracy_lr", "balanced_accuracy"), ">", "criteria", name, exclude=excl, replication=True)
              for name in ("rate", "random")}
     verdict = "not run" if not crit else _combine({k: v["verdict"] for k, v in parts.items()})
     return {"id": "P2", "title": "Criteria subset above rate-matched and random subsets",
-            "comparator": "criteria vs rate; criteria vs random", "statistic": "paired balanced_accuracy difference > 0 (both)",
+            "comparator": "criteria vs rate; criteria vs random (same K_eff per session x region)", "statistic": "paired Left/Right balanced accuracy difference > 0 (both)",
             "failure_condition": "either comparison with p >= 0.05 or CI lower bound <= 0", "comparisons": parts,
             "verdict": verdict, "result": " || ".join(f"vs {k}: {_summary_line(v)}{_replication_line(v)} -> {v['verdict']}" for k, v in parts.items())}
 
@@ -795,9 +795,23 @@ def _p5a(runs: dict) -> dict:
     else:
         comp.update({"verdict": "not run", "missing": ["region_ablation per_session"], "n_sessions": 0, "mean_diff": math.nan,
                      "ci": [math.nan, math.nan], "p": math.nan, "passes": False})
+    # the other ablation method, reported next to the primary one (drop = in-distribution, permute = reliance)
+    other_method = {"drop": "permute", "permute": "drop"}.get(method_used or "", None)
+    if other_method:
+        oa, ob = [], []
+        for res in crit:
+            rows_o = [a for a in (res.get("region_ablation") or []) if isinstance(a, dict) and a.get("method") == other_method]
+            for a in rows_o:
+                for s, v in (a.get("per_session") or {}).items():
+                    if s in excl:
+                        continue
+                    (oa if str(a.get("dropped_region", "")).startswith("ALM") else ob).append(_finite(v))
+        comp["other_method"] = {"method": other_method, "mean_delta_alm": _mean([v for v in oa if not math.isnan(v)]),
+                                "mean_delta_str": _mean([v for v in ob if not math.isnan(v)])}
     out["comparison"] = comp
     out["verdict"] = comp["verdict"]
-    out["result"] = _summary_line(comp) + (f" (method={method_used})" if method_used else "")
+    om = comp.get("other_method")
+    out["result"] = _summary_line(comp) + (f" (method={method_used}" + (f"; {om['method']}: ALM {_fmt(om['mean_delta_alm'])} vs STR {_fmt(om['mean_delta_str'])}" if om else "") + ")" if method_used else "")
     return out
 
 
@@ -888,9 +902,9 @@ def _p6(runs: dict) -> dict:
 def _p7(runs: dict) -> dict:
     crit = runs.get("criteria")
     other = "criteria_popmean" if runs.get("criteria_popmean") else ("criteria_nospec" if runs.get("criteria_nospec") else "criteria_popmean")
-    comp = compare_arms(crit, runs.get(other), "balanced_accuracy", ">", "criteria", other, exclude=empty_criteria_sessions(runs), replication=True)
+    comp = compare_arms(crit, runs.get(other), ("balanced_accuracy_lr", "balanced_accuracy"), ">", "criteria", other, exclude=empty_criteria_sessions(runs), replication=True)
     return {"id": "P7", "title": "Spectro-temporal population branch adds accuracy beyond the population-rate control",
-            "comparator": f"criteria vs {other}", "statistic": "paired balanced_accuracy difference > 0",
+            "comparator": f"criteria vs {other}", "statistic": "paired Left/Right balanced accuracy difference > 0",
             "failure_condition": comp["failure_condition"], "comparison": comp, "verdict": comp["verdict"],
             "result": _summary_line(comp) + _replication_line(comp)}
 
@@ -989,7 +1003,8 @@ def _selection_summary(out_dir: Path, runs: dict) -> dict:
         for k in ("n_units", "n_floor", "n_eligible", "n_selected"):
             if k in summary:
                 out[k] = int(summary[k].sum())
-        for k in ("median_stability_selected", "null_median_stability_max", "median_onset_ms_selected", "frac_sustained_to_go_selected",
+        for k in ("median_stability_selected", "null_median_stability_max", "null_n_selected_mean", "null_n_selected_max",
+                  "median_onset_ms_selected", "frac_sustained_to_go_selected",
                   "frac_selectivity", "frac_coupling", "frac_spectral", "frac_ramp", "frac_locus", "frac_ignore"):
             if k in summary:
                 col = pd.to_numeric(summary[k], errors="coerce")
@@ -1137,9 +1152,9 @@ def render_markdown(report: dict) -> str:
             L.append("**(i) context sufficiency index (criteria run)**\n\n" + _md_table(
                 ["seed", "tau95 (ms)", "tau95 CI (ms)", f"CI upper <= {TAU95_MAX_MS:.0f}"],
                 [[r["seed"], _fmt(r["tau95_ms"], 0), _fmt_ci(r["tau95_ci_ms"], 0), r["pass"]] for r in p.get("csi_per_seed", [])]))
-            L.append("\n**(ii) temporal occlusion: last window vs mean of earlier windows** (pooled worst window per seed: "
+            L.append("\n**(ii) temporal occlusion: last window vs the worst earlier window** (pooled worst window per seed: "
                      + ", ".join(f"seed{r['seed']} end={_fmt(r['window_end_ms'], 0)} ms{' (last)' if r['is_last'] else ''}" for r in p.get("argmin_window_per_seed", [])) + ")\n")
-            L.append(_comparison_md(p.get("comparison"), "delta last window", "mean delta earlier windows"))
+            L.append(_comparison_md(p.get("comparison"), "delta last window", "worst delta earlier window"))
             L.append("\n**(iii) linear decoder tau95 (reported)**: " + ", ".join(f"seed{r['seed']} = {_fmt(r['tau95_linear_ms'], 0)} ms" for r in p.get("linear_tau95_per_seed", [])) + "\n")
         elif pid == "P4":
             L.append(_comparison_md(p.get("comparison"), "model dev. expl.", "null (0)"))
@@ -1174,6 +1189,11 @@ def render_markdown(report: dict) -> str:
         L.append(_md_table(["region", "recorded", "selected"], [[r, v["recorded"], v["selected"]] for r, v in sel["per_region"].items()]))
         ms, nl = sel.get("median_stability_selected", {}), sel.get("null_median_stability_max", {})
         L.append(f"\n* median stability of selected units: {_fmt(ms.get('median'))} (median over sessions) vs null median-stability max {_fmt(nl.get('max'))}")
+        nn = sel.get("null_n_selected_mean")
+        if nn:
+            L.append(f"* units that would be selected with permuted labels (empirical false-selection estimate, mean over permutations, "
+                     f"summed over regions): mean {_fmt(nn.get('mean'), 1)} per session, max {_fmt(sel.get('null_n_selected_max', {}).get('max'), 1)} "
+                     f"- vs {sel.get('n_selected', 'n/a')} selected in total")
         L.append(f"* median onset of selected units: {_fmt(sel.get('median_onset_ms_selected', {}).get('median'), 0)} ms; fraction sustained to go: "
                  f"{_fmt(sel.get('frac_sustained_to_go_selected', {}).get('mean'))}")
         L.append("* criterion fractions among units (mean over sessions): " + ", ".join(
@@ -1185,7 +1205,8 @@ def render_markdown(report: dict) -> str:
         cols = ["recorded", "pass_floor", "eligible", "stable", "selected"]
         L.append(_md_table(["region"] + cols, [[r] + [_fmt(v.get(c), 1) for c in cols] for r, v in sel["funnel_per_region"].items()]))
         efb = sel.get("expected_false_selections_bound") or {}
-        L.append(f"\n* expected false-selection bound: mean per region-session {_fmt(efb.get('mean_per_region_session'))}, max {_fmt(efb.get('max'))}")
+        L.append(f"\n* Meinshausen-Buehlmann false-selection bound: mean per region-session {_fmt(efb.get('mean_per_region_session'))}, max {_fmt(efb.get('max'))} "
+                 f"(informative only when K_eff << n_eligible; the label-permutation estimate above is the empirical one)")
     if sel.get("phi"):
         L.append("\n* phi coefficients between criteria (mean over sessions): " + ", ".join(f"{k} = {_fmt(v['mean'])}" for k, v in sel["phi"].items()))
     w = sel.get("w_independence") or {}
