@@ -509,6 +509,80 @@ def duplicate_channel_agreement(caches: list[SessionCache], dup: pd.DataFrame, t
                                        "frac_identical_target", "frac_same_label"])
 
 
+def twin_unit_order_check(caches: list[SessionCache], dup: pd.DataFrame, cfg, max_trials: int = 30, tol_s: float = 1e-3) -> pd.DataFrame:
+    """Does the Data2 export list, per region, exactly the active units of the Data export *in the same order*?
+
+    The Data2 files carry no unit IDs; if their rows are the Data rows minus the silent units, in Data order, then
+    unit identity is recoverable for the seven Data2-only sessions by sequence alignment (active units are a
+    subsequence of a fixed unit table) and no NWB re-export is needed.  Checked on the recordings present in both
+    trees, trial by trial: the Data units with at least one spike in the file are compared, position by position,
+    with the Data2 spike trains (Data2 times shifted onto the Data time base).  Reports, per pair, the fraction of
+    matched trials whose active-unit counts agree in every region, whose rows agree in order in every region, and
+    the mean fraction of rows that match in order."""
+    from .rasters import read_epochs, spikes_by_region
+    by = {c.session: c for c in caches}
+    rows = []
+    for _, d in dup.iterrows():
+        a, b = by.get(d.session_a), by.get(d.session_b)
+        if a is None or b is None:
+            continue
+        ta = pd.to_numeric(a.meta.get("ep_delay_start_times"), errors="coerce").to_numpy(dtype=float)
+        tb = pd.to_numeric(b.meta.get("ep_delay_start_times"), errors="coerce").to_numpy(dtype=float)
+        n, n_counts, n_order, fracs = 0, 0, 0, []
+        for i, t in enumerate(ta):
+            if n >= max_trials or not np.isfinite(t):
+                continue
+            j = np.flatnonzero(np.abs(tb - t) <= 2e-3)
+            if j.size != 1:
+                continue
+            j = int(j[0])
+            try:
+                da = np.load(a.meta.npz_path.iloc[i], allow_pickle=True)
+                db = np.load(b.meta.npz_path.iloc[j], allow_pickle=True)
+                ra, rb = spikes_by_region(da), spikes_by_region(db)
+            except Exception:
+                continue
+            ep_a, ep_b = read_epochs(da), read_epochs(db)
+            shift = 0.0
+            # put both on the same time base: compare relative to each file's trial start when both have it
+            t0a, t0b = float(ep_a.get("trial_start", np.nan)), float(ep_b.get("trial_start", np.nan))
+            n += 1
+            same_counts, same_order, matched, total = True, True, 0, 0
+            for r in REGIONS:
+                ua = [np.asarray(u, dtype=float) for u in ra[r][0]]
+                ua = [u for u in ua if u.size]                                   # Data: every unit listed, keep the active ones
+                ub = [np.asarray(u, dtype=float) for u in rb[r][0]]
+                if len(ua) != len(ub):
+                    same_counts = False
+                for u, v in zip(ua, ub):
+                    total += 1
+                    if u.size != v.size:
+                        same_order = False
+                        continue
+                    # candidate time bases of the Data2 train: absolute, or relative to trial start (either file's)
+                    ok = False
+                    for base in (0.0, t0b, t0a):
+                        if np.isfinite(base) and np.allclose(np.sort(u), np.sort(v) + base, atol=tol_s):
+                            ok = True
+                            break
+                    if not ok and np.isfinite(t0a) and np.allclose(np.sort(u) - t0a, np.sort(v), atol=tol_s):
+                        ok = True
+                    matched += int(ok)
+                    same_order &= ok
+                if len(ua) != len(ub):
+                    same_order = False
+                    total += abs(len(ua) - len(ub))
+            n_counts += int(same_counts)
+            n_order += int(same_order)
+            fracs.append(matched / max(total, 1))
+        rows.append({"session_a": d.session_a, "session_b": d.session_b, "n_trials_checked": n,
+                     "frac_same_active_counts": n_counts / n if n else float("nan"),
+                     "frac_identical_order": n_order / n if n else float("nan"),
+                     "mean_frac_rows_in_order": float(np.mean(fracs)) if fracs else float("nan")})
+    return pd.DataFrame(rows, columns=["session_a", "session_b", "n_trials_checked", "frac_same_active_counts",
+                                       "frac_identical_order", "mean_frac_rows_in_order"])
+
+
 def _delay_onsets(c: SessionCache) -> np.ndarray:
     col = "ep_delay_start_times"
     if col not in c.meta:

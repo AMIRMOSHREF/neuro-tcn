@@ -429,3 +429,54 @@ def test_standardised_input_uses_training_statistics(cfg, x):
         assert torch.isfinite(out.logits).all() and all(torch.isfinite(out.spec[r]).all() for r in REGIONS)
     m2 = DelayCASTNet([SESSION], K, T_CTX, T_TGT, load_config(None, ["model.d_model=32", "model.standardize_input=false"])).eval()
     assert not m2.standardize_input
+
+
+def test_forecast_starts_at_the_mean_log_rate_and_is_capped(cfg, x):
+    """fit_count_stats puts each unit's forecast base at its training mean log-rate, and the forecast log-rate never
+    exceeds log(255)."""
+    torch.manual_seed(0)
+    m = DelayCASTNet([SESSION], K, T_CTX, T_TGT, cfg).eval()
+    y = {r: torch.poisson(torch.full((B, K, T_TGT), 30.0)).numpy() for r in REGIONS}
+    m.fit_count_stats(SESSION, {r: x[r].numpy() for r in REGIONS}, y)
+    ad = m.adapters[SESSION.replace("/", "__")]
+    for r in REGIONS:
+        assert torch.allclose(ad.log_base[r], torch.log(torch.as_tensor(y[r]).mean((0, 2)) + 0.05), atol=1e-5)
+    with torch.no_grad():
+        ad.log_base["ALM_L"].fill_(40.0)
+        out = m(x, SESSION)
+        assert float(out.forecast_log_rate["ALM_L"].max()) <= m.max_log_rate + 1e-6
+        assert abs(m.max_log_rate - float(np.log(255))) < 0.1
+
+
+def test_wide_path_warm_start_equals_the_tuned_logistic_regression(cfg, x):
+    """With skip_init=logreg the deep head is zero and the wide path carries the sklearn fit: the network's logits at
+    epoch 0 are the logistic regression's decision function on the standardised windowed count features."""
+    from sklearn.linear_model import LogisticRegressionCV
+    from sklearn.model_selection import StratifiedKFold
+    from delaycast.train import warm_start_skip
+    torch.manual_seed(0)
+    n = 40
+    xx = {r: torch.poisson(torch.full((n, K, T_CTX), 0.2)) for r in REGIONS}
+    labels = np.array([0, 1, 2] * 13 + [1])
+    xx["ALM_L"][labels == 1, :4] += 1.0                          # a decodable signal
+    xx["STR_R"][labels == 2, 4:] += 1.0
+    m = DelayCASTNet([SESSION], K, T_CTX, T_TGT, cfg).eval()
+    assert m.skip_init == "logreg" and float(m.classifier[-1].weight.abs().max()) == 0.0
+    m.fit_count_stats(SESSION, {r: xx[r].numpy() for r in REGIONS}, {r: xx[r][:, :, :T_TGT].numpy() for r in REGIONS})
+    info = warm_start_skip(m, SESSION, {r: xx[r].numpy() for r in REGIONS}, labels, cfg)
+    assert info["fitted"] and info["n_features"] == 4 * m.n_feat * K
+    # reference fit on the same standardised features
+    ad = m.adapters[SESSION.replace("/", "__")]
+    Z = []
+    for r in REGIONS:
+        f, _ = m.count_features(xx[r], torch.ones(n, T_CTX), m.late_bins, m.n_windows)
+        Z.append(((f - ad.skip[r].mu) / ad.skip[r].sd).numpy())
+    Z = np.concatenate(Z, axis=1)
+    clf = LogisticRegressionCV(Cs=np.logspace(-3, 1, 6), cv=StratifiedKFold(5, shuffle=True, random_state=int(cfg.train.seed)),
+                               class_weight="balanced", max_iter=1000, n_jobs=1).fit(Z, labels)
+    with torch.no_grad():
+        out = m(xx, SESSION)
+    ref = clf.decision_function(Z)
+    assert np.allclose(out.logits.numpy(), ref, atol=1e-3)
+    assert (out.logits.argmax(1).numpy() == clf.predict(Z)).all()
+    assert float(out.logits_backbone.abs().max()) == 0.0

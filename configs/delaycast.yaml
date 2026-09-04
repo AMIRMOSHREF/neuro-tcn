@@ -99,7 +99,9 @@ model:
   skip_windows: 4             # wide path features per unit: mean over the context, over the late delay, and over this many
                               # equal windows of the context (time-resolved linear decoder); 0 = the two baseline features only
   standardize_input: true     # backbone input: per-unit z-score of the sqrt-count with training-trial statistics
-  max_log_rate: 7.0           # clamp of the forecast log-rate inside the Poisson loss
+  max_log_rate: 5.5           # cap of the forecast log-rate (log 255: the uint8 cache never holds more per bin)
+  skip_init: logreg           # wide path initialised at the C-tuned class-balanced logistic regression on the training
+                              # trials (the deep head then starts at zero: the network begins as the linear decoder) | zeros
   forecast_weight: 1.0        # weight of the Poisson forecasting loss
   persistence_late_bins: 20   # late-delay window (bins) whose mean rate seeds each neuron's own forecast
   class_weight: 1.0
@@ -111,7 +113,8 @@ train:
   batch_size: 32
   lr: 0.002
   gate_lr_mult: 10.0            # neuron gates learn faster than the backbone
-  skip_lr_mult: 5.0             # ... and so does the linear count read-out (a logistic regression on standardised features)
+  skip_lr_mult: 1.0             # learning-rate multiplier of the linear count read-out (it starts at the tuned logistic
+                                # regression with skip_init: logreg, so it only needs to drift; 5.0 when it starts from zero)
   weight_decay: 0.0001
   patience: 12
   select_by: "val_ce"           # checkpoint selection: val_ce (classification cross-entropy) | val_loss (multi-task) | val_bacc

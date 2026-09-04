@@ -59,6 +59,11 @@ the upcoming action** — and whether that answer is the same across recordings.
   sum and are left out of the grouping, so the channels of the `Data` export (every unit listed) and of the `Data2`
   export (active units only) of the same trial are identical — the three duplicate recordings are a direct check,
   which `cache` runs in this mode (fraction of matched trials with identical channels, `duplicate_channel_agreement.csv`).
+  `data.population_groups` sets the number of channels; finer groups pool fewer units, so less of the single-unit
+  selectivity cancels within a channel and the top-ranked channels approach unit identity (8 groups cost 0.75 vs
+  0.96 Left/Right accuracy on the `Data` sessions against their unit-level runs). `cache` also tests, on the twin
+  recordings, whether the `Data2` rows are the `Data` units minus the silent ones in the same order — if so, unit
+  identity is recoverable for the `Data2`-only sessions by sequence alignment.
   The channels are not neurons: no selection is run, every arm takes all channels (the `rate` / `random` arms and
   the `linonly` / `noskip` ablations are skipped as they would train on identical inputs) and the report marks P1a,
   P1b, P2, P4 and P6 as not applicable, while P0, P3, P5a/b, P7 and P8 are tested on the full corpus (`Data` +
@@ -189,8 +194,11 @@ Design choices that make the method testable:
    (each neuron's late-delay log-rate seeds its own forecast) so the decoder learns deviations from persistence.
    Each unit's Poisson term is divided by its training mean count (`train.forecast_norm: mean_count`, floor 0.1), so
    the gradient of the forecast term is O(1) per unit whatever the count scale — without it the population channels
-   (≈ 30 spikes per bin) made the forecast term 10× the classification term and the loss unstable; the forecast
-   log-rate is clamped at 7 inside the loss. The checkpoint is the epoch with the lowest class-weighted validation
+   (≈ 30 spikes per bin) made the forecast term 10× the classification term and the loss unstable. Each unit's
+   forecast base (`log_base`) starts at its training mean log-rate — the level of the PSTH null — so the decoder
+   learns deviations (from a zero start, channels with 30 counts per bin never reached their scale within early
+   stopping and the forecast sat far below the null), and the forecast log-rate is capped at log 255 (no cached bin
+   holds more; one runaway channel otherwise dominates a region's deviance). The checkpoint is the epoch with the lowest class-weighted validation
    cross-entropy (`train.select_by: val_ce`); the multi-task loss is dominated by the Poisson term late in training
    and can select a checkpoint that trades accuracy for forecast likelihood. μ = 0.1 (0.5 pushed the gates of the
    already sparse selected set to ≈ 0.68).

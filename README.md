@@ -117,6 +117,17 @@ git pull
 .\scripts\run_delaycast.ps1 -Population            # -> outputs\delaycast_pop\REPORT.md, figures, runs
 ```
 
+`-Groups 32` (or 64) uses finer rate-quantile groups: each channel then pools fewer units, so less of the single-unit
+selectivity cancels inside a channel, and the top-ranked channels of a region are near-identities (the most active
+units keep their rank from trial to trial). With 8 groups the first run gave 0.75 Left/Right accuracy on the
+`Data` sessions against 0.96 for their unit-level runs — that gap is what the pooling costs.
+
+`cache` also prints, for the three recordings present in both trees, whether the `Data2` rows are the `Data` units
+minus the silent ones **in the same order**. If that check reads 1.0, unit identity is recoverable for the seven
+`Data2`-only sessions by sequence alignment (the active units of every trial are a subsequence of one fixed unit
+table) and no NWB re-export is needed; `inspect --npz-detail` prints the `session_path` the export came from, which is
+where the NWB files live.
+
 What it can and cannot test: the channels are *not neurons*, so there is nothing to select — every arm uses all
 channels, `select` and Figure 1 are skipped (Figure 2 shows the time-frequency content of all channels) and the report
 marks the unit-level predictions **P1a, P1b, P2, P4, P6 as not applicable**. The temporal (P3), regional (P5a/P5b), spectral (P7) and transfer (P8) predictions, and the negative
@@ -254,7 +265,13 @@ The first report on the four `Data` sessions changed four rules; every one is do
   and `logreg_selected_units_windows` is the matching linear baseline), the backbone input is standardised per unit
   (`model.standardize_input`), the forecast loss is scaled per unit by its mean count (`train.forecast_norm`) so that
   population channels with tens of spikes per bin do not swamp the classification loss, and the fixed Gabor bank is
-  replaced by the learned filterbank (`model.spectral_branch: learned`).
+  replaced by the learned filterbank (`model.spectral_branch: learned`);
+* **after the second population run**: the wide path is **warm-started at the tuned logistic regression** on the
+  training trials (`model.skip_init: logreg`; the deep head starts at zero, so the network begins exactly as the
+  linear decoder and training can only add to it — jointly trained from zero it had stopped 1.9 points below the same
+  decoder fitted by sklearn), and the forecast starts at each unit's mean log-rate and is capped at log 255 (from a
+  zero start the population channels' forecast stayed far below the PSTH null within early stopping, and one runaway
+  channel could dominate a region's deviance).
 
 The report also excludes sessions with an empty criteria set from criteria-arm comparisons (listed in its header,
 with K<sub>eff</sub> per session), prints, per comparison, in how many sessions the prediction replicates on the

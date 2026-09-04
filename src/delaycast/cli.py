@@ -101,6 +101,12 @@ def _npz_detail(recs) -> None:
     for k in data.files:
         arr = data[k]
         print(f"  {k:24s} shape={arr.shape} dtype={arr.dtype}")
+    # Provenance scalars of the Data2 export: where its NWB source lives (the unit-level re-export needs those files)
+    prov = {k: str(data[k]) for k in ("session_path", "session_name", "subject_id", "trial_uid") if k in data.files and data[k].shape == ()}
+    if prov:
+        print("  provenance: " + "; ".join(f"{k} = {v}" for k, v in prov.items()))
+        if "session_path" in prov:
+            print("  -> the NWB source of this export (scripts/export_nwb_trials.py --nwb-dir <that folder> gives unit IDs for every trial)")
     # Route through the same schema reader the cache uses, so what is printed is what gets binned
     # (both NPZ schemas, ragged / NaN-padded / single-unit spike containers).
     try:
@@ -177,7 +183,7 @@ def _npz_detail(recs) -> None:
 
 def cmd_cache(cfg: Config, args) -> None:
     from .data.cache import (_cache_key, build_cache, cache_summary, duplicate_channel_agreement, excluded_sessions,
-                             find_duplicate_sessions, representation)
+                             find_duplicate_sessions, representation, twin_unit_order_check)
     caches = build_cache(cfg, force=args.force)
     pd.set_option("display.width", 250)
     summ = cache_summary(caches)
@@ -209,6 +215,11 @@ def cmd_cache(cfg: Config, args) -> None:
             print("\nPOPULATION CHANNELS OF THE TWO EXPORTS (matched trials; 1.0 = the Data and Data2 files of the same trial "
                   "give identical channels, as the representation is designed to; lower = the exports curate units differently):")
             print(agree.to_string(index=False))
+        order = twin_unit_order_check(caches, dup, cfg)
+        order.to_csv(Path(cfg.data.cache_dir) / _cache_key(cfg) / "twin_unit_order.csv", index=False)
+        print("\nUNIT ORDER OF THE TWO EXPORTS (are the Data2 rows the Data units minus the silent ones, in the same order? "
+              "1.0 in every column = unit identity is recoverable for the Data2-only sessions by sequence alignment):")
+        print(order.to_string(index=False))
     else:
         print("\nno session appears in both Data and Data2")
 

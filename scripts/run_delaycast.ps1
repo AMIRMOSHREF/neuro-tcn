@@ -16,7 +16,9 @@ param(
     [string]$CacheDir = "cache",
     [string]$Seeds = "0,1,2",
     [switch]$Quick,
-    [switch]$Population       # identity-free population channels: Data + Data2 (11 sessions), outputs/delaycast_pop
+    [switch]$Population,      # identity-free population channels: Data + Data2 (11 sessions), outputs/delaycast_pop
+    [int]$Groups = 8          # with -Population: rate-quantile channels per region (8; try 32 or 64 - finer groups keep more
+                              # of the single-unit information, the top-ranked channels become near-identities)
 )
 $ErrorActionPreference = "Stop"
 if ($Population) {
@@ -25,7 +27,11 @@ if ($Population) {
 }
 $common = @("--set", "data.data_a_root=$DataA", "--set", "data.data_b_root=$DataB",
             "--set", "output_dir=$OutputDir", "--set", "data.cache_dir=$CacheDir")
-if ($Population) { $common += @("--set", "data.representation=population") }
+if ($Population) {
+    $common += @("--set", "data.representation=population", "--set", "data.population_groups=$Groups")
+    if ($Groups -gt 32) { $common += @("--set", "selection.top_k_per_region=$Groups") }
+    if ($Groups -ne 8 -and $OutputDir -eq "outputs/delaycast_pop") { $OutputDir = "outputs/delaycast_pop$Groups"; $common += @("--set", "output_dir=$OutputDir") }
+}
 
 # NB: the parameter must not be called $args - that is a PowerShell automatic variable and would be empty here.
 function Step([string]$name, [string[]]$cmdArgs) {

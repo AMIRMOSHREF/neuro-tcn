@@ -345,17 +345,82 @@ def _check_training_set(train_ds: TrialDataset, val_ds: TrialDataset, splits: di
                            f"over {len(train_sessions)} session(s); see `python -m delaycast cache` drop reasons.")
 
 
+@torch.no_grad()
+def warm_start_skip(model: DelayCASTNet, session: str, x: dict[str, np.ndarray], labels: np.ndarray, cfg: Config) -> dict:
+    """Fit the wide path of one session at the tuned logistic regression on its training trials.
+
+    The wide path is a logistic regression on the standardised windowed count features (``count_features`` with the
+    ``fit_count_stats`` statistics, gates at 1).  Trained jointly from zero it stops where early stopping on the
+    validation cross-entropy stops the whole network, typically short of the tuned solution (on the 11-session
+    population corpus the model ended 1.9 points below the same decoder fitted by sklearn).  So the read-out is
+    initialised at the C-tuned, class-balanced multinomial fit of sklearn on exactly those features and trials
+    (``model.skip_init: logreg``); with the deep head at zero the network starts *as* the linear decoder and
+    training can only add to it.  Regularisation C is chosen by stratified cross-validation on the training
+    trials; the validation and test trials are never seen.  Returns fit diagnostics for the log."""
+    from sklearn.linear_model import LogisticRegressionCV
+    from sklearn.model_selection import StratifiedKFold
+    ad = model.adapters[session.replace("/", "__").replace(".", "_")]
+    feats, cols = [], []
+    for r in REGIONS:
+        xr = torch.as_tensor(np.asarray(x[r]), dtype=torch.float32)
+        f, _ = model.count_features(xr, torch.ones(xr.shape[0], xr.shape[2]), model.late_bins, model.n_windows)
+        z = ((f - ad.skip[r].mu.cpu()) / ad.skip[r].sd.cpu()).numpy()
+        feats.append(z)
+        cols.append(z.shape[1])
+    X = np.concatenate(feats, axis=1)
+    y = np.asarray(labels, dtype=int)
+    classes = np.unique(y)
+    n_min = int(np.bincount(y).min()) if len(y) else 0
+    if X.shape[1] == 0 or len(classes) < 2 or n_min < 2 or (np.abs(X).sum() == 0):
+        return {"session": session, "fitted": False, "reason": "too few trials/classes or empty features"}
+    cv = min(5, n_min)
+    clf = LogisticRegressionCV(Cs=np.logspace(-3, 1, 6), cv=StratifiedKFold(cv, shuffle=True, random_state=int(cfg.train.seed)),
+                               class_weight="balanced", max_iter=1000, n_jobs=1)
+    clf.fit(X, y)
+    coef = np.zeros((len(CLASSES), X.shape[1]), dtype=np.float32)
+    bias = np.zeros(len(CLASSES), dtype=np.float32)
+    if len(clf.classes_) == 2:          # binary fit: sklearn stores one row (class 1 vs class 0)
+        c0, c1 = int(clf.classes_[0]), int(clf.classes_[1])
+        coef[c1], bias[c1] = clf.coef_[0] / 2, clf.intercept_[0] / 2
+        coef[c0], bias[c0] = -clf.coef_[0] / 2, -clf.intercept_[0] / 2
+    else:
+        for i, c in enumerate(clf.classes_):
+            coef[int(c)], bias[int(c)] = clf.coef_[i], clf.intercept_[i]
+    off = 0
+    for r, n in zip(REGIONS, cols):
+        # the read-out sees z * gate (tiled over the n_feat feature blocks): divide the fitted weights by the gates'
+        # initial values so that the logits at epoch 0 are exactly the logistic regression's
+        g = np.tile(ad.gates[r].gates().detach().cpu().numpy().astype(np.float32), model.n_feat)
+        w = coef[:, off: off + n] / np.maximum(g, 1e-3)[None, :]
+        ad.skip[r].lin.weight.copy_(torch.as_tensor(w).to(ad.skip[r].lin.weight.device))
+        off += n
+    # the bias is shared by the four per-region read-outs: put it on the first region only
+    for r in REGIONS:
+        ad.skip[r].lin.bias.zero_()
+    ad.skip[REGIONS[0]].lin.bias.copy_(torch.as_tensor(bias).to(ad.skip[REGIONS[0]].lin.bias.device))
+    C = float(np.atleast_1d(clf.C_)[0])
+    return {"session": session, "fitted": True, "C": C, "n_trials": int(len(y)), "n_features": int(X.shape[1]),
+            "train_accuracy": float(clf.score(X, y))}
+
+
 def build_model(cfg: Config, tensors: list[SessionTensors], device, splits: dict | None = None) -> DelayCASTNet:
     t_ctx = tensors[0].x[REGIONS[0]].shape[2]
     t_tgt = tensors[0].y[REGIONS[0]].shape[2]
     model = DelayCASTNet([t.session for t in tensors], int(cfg.selection.top_k_per_region), t_ctx, t_tgt, cfg)
-    # Standardisation of the linear count read-out: training (+ adaptation) trials of every session only - never a
-    # test trial.  Without splits (a re-loaded run) the buffers come from the checkpoint.
+    # Statistics and warm start of the wide path: training (+ adaptation) trials of every session only - never a
+    # test trial.  Without splits (a re-loaded run) everything comes from the checkpoint.
     if splits is not None:
         for t in tensors:
             idx = fit_trials(splits[t.session]) if t.session in splits else np.arange(t.n_trials)
             if len(idx):
                 model.fit_count_stats(t.session, {r: t.x[r][idx] for r in REGIONS}, {r: t.y[r][idx] for r in REGIONS})
+                if model.linear_skip and model.skip_init == "logreg":
+                    info = warm_start_skip(model, t.session, {r: t.x[r][idx] for r in REGIONS}, t.labels[idx], cfg)
+                    if info.get("fitted"):
+                        log.info("%s: wide path warm-started at the tuned logistic regression (C=%.3g, %d features, %d trials, train acc %.3f)",
+                                 t.session, info["C"], info["n_features"], info["n_trials"], info["train_accuracy"])
+                    else:
+                        log.warning("%s: wide path not warm-started (%s)", t.session, info.get("reason"))
     return model.to(device)
 
 

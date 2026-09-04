@@ -875,6 +875,12 @@ def test_population_channels_agree_between_data_and_data2_exports_of_the_same_re
     assert int(agree.n_matched_trials.iloc[0]) == 14
     assert agree.frac_identical_context.iloc[0] == 1.0 and agree.frac_identical_target.iloc[0] == 1.0
     assert agree.frac_same_label.iloc[0] == 1.0
+    # the twin export lists the same active units but (in this fixture) in a shuffled order: counts agree, order not
+    from delaycast.data.cache import twin_unit_order_check
+    order = twin_unit_order_check(caches, dup, cfg)
+    assert int(order.n_trials_checked.iloc[0]) == 14
+    assert order.frac_same_active_counts.iloc[0] == 1.0
+    assert order.frac_identical_order.iloc[0] < 1.0 and 0.0 < order.mean_frac_rows_in_order.iloc[0] < 1.0
 
 
 # ----------------------------------------------------------------------------- spike-time reference
@@ -965,3 +971,39 @@ def test_session_without_spikes_in_the_window_is_excluded(tmp_path, caplog):
     excl = excluded_sessions(cfg)
     assert list(excl.reason) == ["no_spikes_in_window"] and "time base" in excl.fix.iloc[0]
     assert any("no spike in the context window" in r.message for r in caplog.records)
+
+
+def test_twin_unit_order_check_detects_preserved_order(tmp_path):
+    """A Data2 export that keeps the Data order (silent units dropped, times relative to trial start) scores 1.0."""
+    from delaycast.data.cache import find_duplicate_sessions, twin_unit_order_check
+
+    rng = np.random.default_rng(5)
+    n = {"ALM_L": 5, "ALM_R": 3, "STR_L": 3, "STR_R": 2}
+    log_rows = []
+    for i in range(1, 13):
+        cls = ["Left", "Right"][i % 2]
+        pay = _payload(rng, n, cls, t0=20.0 * i)
+        spikes = list(pay["spike_times"])
+        spikes[1] = np.empty(0)
+        pay["spike_times"] = _object_array(spikes)
+        _write_a(tmp_path, "Session1", i, cls, pay)
+        keep = [k for k in range(len(spikes)) if len(spikes[k])]
+        b = dict(pay)
+        b["unit_ids"] = np.asarray(pay["unit_ids"])[keep]
+        b["brain_region"] = np.asarray(pay["brain_region"])[keep]
+        b["spike_times"] = _object_array([spikes[k] - pay["trial_start"] for k in keep])     # relative to trial start
+        _write_b(tmp_path, i, cls, _strip_licks(_to_split(b)))
+        licks = pay["left_lick_times"] if cls == "Left" else pay["right_lick_times"]
+        log_rows.append({"trial": i, "outcome": "hit", "trial_instruction": cls.lower(), "early_lick": "no early",
+                         "left_lick_times": str(licks.tolist()) if cls == "Left" else "[]",
+                         "right_lick_times": str(licks.tolist()) if cls == "Right" else "[]", "excluded": False, "photostim_onset": "N/A"})
+    _write_b_csv(tmp_path, log_rows)
+    cfg = _cfg(tmp_path)
+    cfg.set_path("data.representation", "population")
+    caches = build_cache(cfg, force=True)
+    b_cache = next(c for c in caches if c.dataset == "B")
+    assert set(b_cache.meta.spike_ref) == {"trial_start"}
+    dup = find_duplicate_sessions(caches)
+    order = twin_unit_order_check(caches, dup, cfg)
+    assert order.frac_same_active_counts.iloc[0] == 1.0 and order.frac_identical_order.iloc[0] == 1.0
+    assert order.mean_frac_rows_in_order.iloc[0] == 1.0

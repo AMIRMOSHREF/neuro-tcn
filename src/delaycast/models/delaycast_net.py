@@ -212,7 +212,8 @@ class DelayCASTNet(nn.Module):
         self.standardize_input = bool(m.get_path("standardize_input", True))
         self.forecast_norm = str(cfg.train.get_path("forecast_norm", "mean_count"))
         self.forecast_norm_floor = float(cfg.train.get_path("forecast_norm_floor", 0.1))
-        self.max_log_rate = float(m.get_path("max_log_rate", 7.0))
+        self.max_log_rate = float(m.get_path("max_log_rate", 5.5))           # log(255): the uint8 cache never holds more
+        self.skip_init = str(m.get_path("skip_init", "logreg"))                # logreg (warm start) | zeros
         # ---- spectral branch (in-model, causal)
         branch = str(m.get_path("spectral_branch", "learned" if bool(m.get_path("use_spectral_branch", True)) else "none"))
         bands = {kk: list(v) for kk, v in cfg.selection.bands_hz.items()}
@@ -235,6 +236,11 @@ class DelayCASTNet(nn.Module):
         self.pool = AttentionPool(d)
         self.cross = CrossRegionAttention(d, int(m.n_heads), float(m.dropout), len(REGIONS))
         self.classifier = nn.Sequential(nn.LayerNorm(d), nn.Dropout(float(m.dropout)), nn.Linear(d, len(CLASSES)))
+        if self.skip_init == "logreg":
+            # With the wide path warm-started at the tuned logistic regression (train.warm_start_skip), the deep head
+            # starts at zero: at epoch 0 the classifier *is* the linear decoder and the deep path learns the residual.
+            nn.init.zeros_(self.classifier[-1].weight)
+            nn.init.zeros_(self.classifier[-1].bias)
         # Forecast decoder: fused + region token -> D x T_tgt latent trajectory (shared), then a
         # session-specific linear read-out to the K selected neurons of that region.
         self.time_embed = nn.Parameter(torch.randn(t_tgt, d) * 0.02)
@@ -304,7 +310,12 @@ class DelayCASTNet(nn.Module):
             if y is not None and r in y:
                 yr = torch.as_tensor(np.asarray(y[r]), dtype=torch.float32)
                 if yr.ndim == 3 and yr.shape[0]:
-                    st.rate.copy_(yr.mean((0, 2)).to(st.rate.device))
+                    rate = yr.mean((0, 2))
+                    st.rate.copy_(rate.to(st.rate.device))
+                    # The forecast starts at each unit's training mean log-rate (the level of the PSTH null) and the
+                    # decoder learns deviations; from log-rate 0 a channel with 30 counts per bin needed thousands of
+                    # steps just to reach its scale, and the forecast stayed far below the null within early stopping.
+                    ad.log_base[r].data.copy_(torch.log(rate + 0.05).to(ad.log_base[r].device))
 
     # ------------------------------------------------------------------ session handling
     def add_session(self, session: str) -> None:
@@ -393,7 +404,9 @@ class DelayCASTNet(nn.Module):
             z = self.dec_in(z)[:, None, :] + self.time_embed[None]        # (B, T_tgt, D)
             z = self.decoder(z.transpose(1, 2)).transpose(1, 2)          # (B, T_tgt, D)
             persist = (ad.persist[r][None] * late_log[r])[:, None, :]              # (B, 1, K)
-            forecast[r] = (ad.read_out[r](z) + ad.log_base[r] + persist).transpose(1, 2)  # (B, K, T_tgt) log-rate
+            # (B, K, T_tgt) log-rate, capped at log(255): no cached bin can hold more, and one runaway prediction
+            # otherwise dominates the deviance of a whole region
+            forecast[r] = (ad.read_out[r](z) + ad.log_base[r] + persist).transpose(1, 2).clamp(max=self.max_log_rate)
         return ModelOutput(logits, forecast, tattn, sattn, w_region, gates, penalty / len(REGIONS), spec_used,
                            logits_bb, skip_logits if self.linear_skip else None)
 
