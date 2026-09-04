@@ -217,8 +217,9 @@ def cmd_cache(cfg: Config, args) -> None:
             print(agree.to_string(index=False))
         order = twin_unit_order_check(caches, dup, cfg)
         order.to_csv(Path(cfg.data.cache_dir) / _cache_key(cfg) / "twin_unit_order.csv", index=False)
-        print("\nUNIT ORDER OF THE TWO EXPORTS (are the Data2 rows the Data units minus the silent ones, in the same order? "
-              "1.0 in every column = unit identity is recoverable for the Data2-only sessions by sequence alignment):")
+        print("\nUNIT ORDER OF THE TWO EXPORTS (every Data2 row identified by its spike train; frac_identical_order = Data order kept; "
+              "order_consistency = the same relative order from trial to trial (1.0: one fixed order per session -> identity "
+              "recoverable by sequence alignment; ~0.5: re-drawn per trial); rho_pos_vs_*: what the rows are sorted by):")
         print(order.to_string(index=False))
     else:
         print("\nno session appears in both Data and Data2")

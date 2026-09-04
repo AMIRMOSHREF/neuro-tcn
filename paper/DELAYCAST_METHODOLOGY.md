@@ -61,9 +61,11 @@ the upcoming action** — and whether that answer is the same across recordings.
   which `cache` runs in this mode (fraction of matched trials with identical channels, `duplicate_channel_agreement.csv`).
   `data.population_groups` sets the number of channels; finer groups pool fewer units, so less of the single-unit
   selectivity cancels within a channel and the top-ranked channels approach unit identity (8 groups cost 0.75 vs
-  0.96 Left/Right accuracy on the `Data` sessions against their unit-level runs). `cache` also tests, on the twin
-  recordings, whether the `Data2` rows are the `Data` units minus the silent ones in the same order — if so, unit
-  identity is recoverable for the `Data2`-only sessions by sequence alignment.
+  0.96 Left/Right accuracy on the `Data` sessions against their unit-level runs; 32 groups gave 0.74, no better
+  than 8: the pooling, not the channel count, is the ceiling). `cache` also identifies, on the twin recordings,
+  every `Data2` row by its spike train and tests whether the rows keep the `Data` order and whether they keep one
+  fixed order across trials (`order_consistency`) — if so, unit identity is recoverable for the `Data2`-only
+  sessions by sequence alignment; on the real data the rows are the same active units but not in `Data` order.
   The channels are not neurons: no selection is run, every arm takes all channels (the `rate` / `random` arms and
   the `linonly` / `noskip` ablations are skipped as they would train on identical inputs) and the report marks P1a,
   P1b, P2, P4 and P6 as not applicable, while P0, P3, P5a/b, P7 and P8 are tested on the full corpus (`Data` +
@@ -186,7 +188,14 @@ Design choices that make the method testable:
    windowed rates cannot express; `logreg_selected_units_windows` is the matching external baseline of P1b. The
    ablations `linonly` (wide path alone) and `noskip` (deep path alone) are trained in the same pipeline and
    reported next to P1b. Added after the first real-data run, in which the deep path alone was 0.8 points below
-   logistic regression on the same units.
+   logistic regression on the same units. The wide path is **warm-started** (`model.skip_init: logreg`) at the
+   C-tuned, class-balanced multinomial logistic regression fitted by scikit-learn on the standardised features of
+   the training (+ adaptation) trials — never the validation trials, which early stopping needs untouched, and never
+   the test trials; a class with fewer than two training trials is left out of the fit and starts at its log-prior;
+   the weights are divided by the gates' initial values so that the logits are identical — and the deep head starts
+   at zero: at epoch 0 the network *is* the tuned linear decoder, and early stopping on the validation cross-entropy
+   can only keep what the deep path adds. Trained jointly from zero on the 11-session population corpus the
+   read-out had stopped 1.9 points short of the same decoder fitted directly.
 7. **Standardised read-in.** The backbone input of every unit is the z-score of its √count with the mean and SD of
    the training trials (`model.standardize_input`), so units — or population channels with tens of spikes per bin —
    enter on the same scale; the gates and the spectral population trace act on the raw gated √counts.
@@ -195,10 +204,11 @@ Design choices that make the method testable:
    Each unit's Poisson term is divided by its training mean count (`train.forecast_norm: mean_count`, floor 0.1), so
    the gradient of the forecast term is O(1) per unit whatever the count scale — without it the population channels
    (≈ 30 spikes per bin) made the forecast term 10× the classification term and the loss unstable. Each unit's
-   forecast base (`log_base`) starts at its training mean log-rate — the level of the PSTH null — so the decoder
-   learns deviations (from a zero start, channels with 30 counts per bin never reached their scale within early
-   stopping and the forecast sat far below the null), and the forecast log-rate is capped at log 255 (no cached bin
-   holds more; one runaway channel otherwise dominates a region's deviance). The checkpoint is the epoch with the lowest class-weighted validation
+   forecast base (`log_base`, a T<sub>tgt</sub> × K template) starts at its training PSTH — exactly the null the
+   forecast is scored against — so the decoder learns deviations (from a zero start, channels with 30 counts per
+   bin never reached their scale within early stopping, and a constant base still sat below the PSTH's time
+   course), and the forecast log-rate is capped at log 255 (no cached bin holds more; one runaway channel otherwise
+   dominates a region's deviance). The checkpoint is the epoch with the lowest class-weighted validation
    cross-entropy (`train.select_by: val_ce`); the multi-task loss is dominated by the Poisson term late in training
    and can select a checkpoint that trades accuracy for forecast likelihood. μ = 0.1 (0.5 pushed the gates of the
    already sparse selected set to ≈ 0.68).

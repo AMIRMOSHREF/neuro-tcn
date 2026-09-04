@@ -192,7 +192,9 @@ class SessionAdapter(nn.Module):
         self.skip = nn.ModuleDict({r: CountReadout(k, len(CLASSES), n_feat) for r in REGIONS})
         self.stats = nn.ModuleDict({r: UnitStats(k) for r in REGIONS})
         self.read_out = nn.ModuleDict({r: nn.Linear(d_model, k) for r in REGIONS})
-        self.log_base = nn.ParameterDict({r: nn.Parameter(torch.zeros(k)) for r in REGIONS})
+        # Forecast base: a per-unit log-rate template over the response epoch (T_tgt x K), initialised at the
+        # training PSTH by fit_count_stats - the forecast starts exactly at the null it is scored against
+        self.log_base = nn.ParameterDict({r: nn.Parameter(torch.zeros(t_tgt, k)) for r in REGIONS})
         # Persistence path: weight of each neuron's own late-delay log-rate in its response forecast.  This
         # is an *ungated* per-neuron self-term by design (it models "no change"), so importance claims are
         # based on permutation occlusion of the raster, never on the gates alone.
@@ -312,10 +314,12 @@ class DelayCASTNet(nn.Module):
                 if yr.ndim == 3 and yr.shape[0]:
                     rate = yr.mean((0, 2))
                     st.rate.copy_(rate.to(st.rate.device))
-                    # The forecast starts at each unit's training mean log-rate (the level of the PSTH null) and the
-                    # decoder learns deviations; from log-rate 0 a channel with 30 counts per bin needed thousands of
-                    # steps just to reach its scale, and the forecast stayed far below the null within early stopping.
-                    ad.log_base[r].data.copy_(torch.log(rate + 0.05).to(ad.log_base[r].device))
+                    # The forecast starts at each unit's training PSTH (log-rate per target bin - the null it is scored
+                    # against) and the decoder learns deviations; from log-rate 0 a channel with 30 counts per bin
+                    # needed thousands of steps just to reach its scale, and with a constant base it still sat below
+                    # the PSTH's time course within early stopping.
+                    psth = yr.mean(0).transpose(0, 1)                                   # (T_tgt, K)
+                    ad.log_base[r].data.copy_(torch.log(psth + 0.05).to(ad.log_base[r].device))
 
     # ------------------------------------------------------------------ session handling
     def add_session(self, session: str) -> None:

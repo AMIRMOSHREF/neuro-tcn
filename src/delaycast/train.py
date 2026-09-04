@@ -357,6 +357,7 @@ def warm_start_skip(model: DelayCASTNet, session: str, x: dict[str, np.ndarray],
     (``model.skip_init: logreg``); with the deep head at zero the network starts *as* the linear decoder and
     training can only add to it.  Regularisation C is chosen by stratified cross-validation on the training
     trials; the validation and test trials are never seen.  Returns fit diagnostics for the log."""
+    import warnings
     from sklearn.linear_model import LogisticRegressionCV
     from sklearn.model_selection import StratifiedKFold
     ad = model.adapters[session.replace("/", "__").replace(".", "_")]
@@ -369,14 +370,20 @@ def warm_start_skip(model: DelayCASTNet, session: str, x: dict[str, np.ndarray],
         cols.append(z.shape[1])
     X = np.concatenate(feats, axis=1)
     y = np.asarray(labels, dtype=int)
-    classes = np.unique(y)
-    n_min = int(np.bincount(y).min()) if len(y) else 0
-    if X.shape[1] == 0 or len(classes) < 2 or n_min < 2 or (np.abs(X).sum() == 0):
-        return {"session": session, "fitted": False, "reason": "too few trials/classes or empty features"}
-    cv = min(5, n_min)
+    counts = np.bincount(y, minlength=len(CLASSES)) if len(y) else np.zeros(len(CLASSES), int)
+    # classes with fewer than 2 training trials (a lone Ignore trial, or none) cannot be cross-validated: they are
+    # left out of the fit and get the log of their (smoothed) prior as logit, i.e. "practically never" at epoch 0
+    present = [c for c in range(len(CLASSES)) if counts[c] >= 2]
+    keep = np.isin(y, present)
+    X, y = X[keep], y[keep]
+    if X.shape[1] == 0 or len(present) < 2 or (np.abs(X).sum() == 0):
+        return {"session": session, "fitted": False, "reason": f"class counts {counts.tolist()}: fewer than 2 classes with >= 2 trials, or empty features"}
+    cv = int(min(5, counts[present].min()))
     clf = LogisticRegressionCV(Cs=np.logspace(-3, 1, 6), cv=StratifiedKFold(cv, shuffle=True, random_state=int(cfg.train.seed)),
                                class_weight="balanced", max_iter=1000, n_jobs=1)
-    clf.fit(X, y)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        clf.fit(X, y)
     coef = np.zeros((len(CLASSES), X.shape[1]), dtype=np.float32)
     bias = np.zeros(len(CLASSES), dtype=np.float32)
     if len(clf.classes_) == 2:          # binary fit: sklearn stores one row (class 1 vs class 0)
@@ -386,6 +393,11 @@ def warm_start_skip(model: DelayCASTNet, session: str, x: dict[str, np.ndarray],
     else:
         for i, c in enumerate(clf.classes_):
             coef[int(c)], bias[int(c)] = clf.coef_[i], clf.intercept_[i]
+    n_all = float(counts.sum())
+    for c in range(len(CLASSES)):
+        if c not in present:
+            prior = (counts[c] + 0.5) / (n_all + 1.5)
+            bias[c] = float(np.log(prior) - np.log(np.mean([(counts[k] + 0.5) / (n_all + 1.5) for k in present])))
     off = 0
     for r, n in zip(REGIONS, cols):
         # the read-out sees z * gate (tiled over the n_feat feature blocks): divide the fitted weights by the gates'
@@ -400,22 +412,26 @@ def warm_start_skip(model: DelayCASTNet, session: str, x: dict[str, np.ndarray],
     ad.skip[REGIONS[0]].lin.bias.copy_(torch.as_tensor(bias).to(ad.skip[REGIONS[0]].lin.bias.device))
     C = float(np.atleast_1d(clf.C_)[0])
     return {"session": session, "fitted": True, "C": C, "n_trials": int(len(y)), "n_features": int(X.shape[1]),
-            "train_accuracy": float(clf.score(X, y))}
+            "train_accuracy": float(clf.score(X, y)), "classes_fitted": present}
 
 
 def build_model(cfg: Config, tensors: list[SessionTensors], device, splits: dict | None = None) -> DelayCASTNet:
     t_ctx = tensors[0].x[REGIONS[0]].shape[2]
     t_tgt = tensors[0].y[REGIONS[0]].shape[2]
     model = DelayCASTNet([t.session for t in tensors], int(cfg.selection.top_k_per_region), t_ctx, t_tgt, cfg)
-    # Statistics and warm start of the wide path: training (+ adaptation) trials of every session only - never a
-    # test trial.  Without splits (a re-loaded run) everything comes from the checkpoint.
+    # Statistics (label-free: train + val + adapt trials) and warm start of the wide path (supervised: TRAINING and
+    # adaptation trials only - a fit that had seen the validation trials made the validation cross-entropy
+    # optimistic and early stopping kept an overfit read-out).  Never a test trial.  Without splits (a re-loaded
+    # run) everything comes from the checkpoint.
     if splits is not None:
         for t in tensors:
             idx = fit_trials(splits[t.session]) if t.session in splits else np.arange(t.n_trials)
+            sp = splits.get(t.session, {})
+            idx_train = np.sort(np.r_[sp.get("train", np.zeros(0, int)), sp.get("adapt", np.zeros(0, int))].astype(int)) if sp else idx
             if len(idx):
                 model.fit_count_stats(t.session, {r: t.x[r][idx] for r in REGIONS}, {r: t.y[r][idx] for r in REGIONS})
-                if model.linear_skip and model.skip_init == "logreg":
-                    info = warm_start_skip(model, t.session, {r: t.x[r][idx] for r in REGIONS}, t.labels[idx], cfg)
+                if model.linear_skip and model.skip_init == "logreg" and len(idx_train):
+                    info = warm_start_skip(model, t.session, {r: t.x[r][idx_train] for r in REGIONS}, t.labels[idx_train], cfg)
                     if info.get("fitted"):
                         log.info("%s: wide path warm-started at the tuned logistic regression (C=%.3g, %d features, %d trials, train acc %.3f)",
                                  t.session, info["C"], info["n_features"], info["n_trials"], info["train_accuracy"])

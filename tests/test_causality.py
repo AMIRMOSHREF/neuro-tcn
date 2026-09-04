@@ -251,7 +251,10 @@ def test_normalized_read_in_has_no_free_scale(model, x):
                 ad.read_in[r].weight.copy_(saved[r])
     assert torch.allclose(after.logits, before.logits, rtol=1e-4, atol=1e-4)
     for r in REGIONS:
-        assert torch.allclose(after.forecast_log_rate[r], before.forecast_log_rate[r], rtol=1e-4, atol=1e-4)
+        # the forecast log-rates of the perturbed model span ~40 units, so the 1e-6 normaliser epsilon shows up as
+        # ~1e-4 absolute differences: compare relative to that scale
+        scale = float(before.forecast_log_rate[r].abs().max())
+        assert torch.allclose(after.forecast_log_rate[r], before.forecast_log_rate[r], rtol=1e-4, atol=1e-5 * max(scale, 1.0))
         assert torch.allclose(after.temporal_attn[r], before.temporal_attn[r], rtol=1e-4, atol=1e-4)
     assert torch.allclose(after.region_attn, before.region_attn, rtol=1e-4, atol=1e-4)
 
@@ -431,16 +434,27 @@ def test_standardised_input_uses_training_statistics(cfg, x):
     assert not m2.standardize_input
 
 
-def test_forecast_starts_at_the_mean_log_rate_and_is_capped(cfg, x):
-    """fit_count_stats puts each unit's forecast base at its training mean log-rate, and the forecast log-rate never
-    exceeds log(255)."""
+def test_forecast_starts_at_the_training_psth_and_is_capped(cfg, x):
+    """fit_count_stats puts each unit's forecast base at its training PSTH (log-rate per target bin), and the forecast
+    log-rate never exceeds log(255)."""
     torch.manual_seed(0)
     m = DelayCASTNet([SESSION], K, T_CTX, T_TGT, cfg).eval()
     y = {r: torch.poisson(torch.full((B, K, T_TGT), 30.0)).numpy() for r in REGIONS}
     m.fit_count_stats(SESSION, {r: x[r].numpy() for r in REGIONS}, y)
     ad = m.adapters[SESSION.replace("/", "__")]
     for r in REGIONS:
-        assert torch.allclose(ad.log_base[r], torch.log(torch.as_tensor(y[r]).mean((0, 2)) + 0.05), atol=1e-5)
+        psth = torch.as_tensor(y[r]).mean(0).transpose(0, 1)                     # (T_tgt, K)
+        assert ad.log_base[r].shape == (T_TGT, K)
+        assert torch.allclose(ad.log_base[r], torch.log(psth + 0.05), atol=1e-5)
+    # at init the forecast is the PSTH template itself (decoder read-out and persistence start at zero)
+    with torch.no_grad():
+        m2 = DelayCASTNet([SESSION], K, T_CTX, T_TGT, cfg).eval()
+        m2.fit_count_stats(SESSION, {r: x[r].numpy() for r in REGIONS}, y)
+        ad2 = m2.adapters[SESSION.replace("/", "__")]
+        for r in REGIONS:
+            ad2.read_out[r].weight.zero_(); ad2.read_out[r].bias.zero_()
+        out2 = m2(x, SESSION)
+        assert torch.allclose(out2.forecast_log_rate["ALM_L"][0], ad2.log_base["ALM_L"].transpose(0, 1), atol=1e-5)
     with torch.no_grad():
         ad.log_base["ALM_L"].fill_(40.0)
         out = m(x, SESSION)
@@ -480,3 +494,33 @@ def test_wide_path_warm_start_equals_the_tuned_logistic_regression(cfg, x):
     assert np.allclose(out.logits.numpy(), ref, atol=1e-3)
     assert (out.logits.argmax(1).numpy() == clf.predict(Z)).all()
     assert float(out.logits_backbone.abs().max()) == 0.0
+
+
+def test_warm_start_uses_training_trials_only_and_handles_a_lone_class(cfg):
+    """build_model fits the wide path on the training (+ adaptation) trials: the validation trials do not change the
+    epoch-0 logits.  A class with fewer than two training trials is left out of the fit and starts with a log-prior
+    logit far below the fitted classes."""
+    from delaycast.data.dataset import SessionTensors
+    from delaycast.train import build_model
+    cfg = load_config(None, ["model.d_model=32", f"selection.top_k_per_region={K}"])
+    torch.manual_seed(0)
+    n = 60
+    labels = np.array([1, 2] * 29 + [0, 1])                              # one Ignore trial only
+    xx = {r: torch.poisson(torch.full((n, K, T_CTX), 0.2)) for r in REGIONS}
+    xx["ALM_L"][labels == 1, :4] += 1.0
+    yy = {r: torch.poisson(torch.full((n, K, T_TGT), 1.0)).numpy() for r in REGIONS}
+    t = SessionTensors(SESSION, "A", {r: xx[r].numpy() for r in REGIONS}, yy, {r: np.ones(K, bool) for r in REGIONS},
+                       {r: np.arange(K) for r in REGIONS}, labels, np.arange(n))
+    train_idx, val_idx = np.arange(0, 40), np.arange(40, 60)
+    splits = {SESSION: {"train": train_idx, "val": val_idx, "test": np.zeros(0, int)}}
+    m1 = build_model(cfg, [t], "cpu", splits).eval()
+    # flip the validation labels: the warm start must not notice
+    t2 = SessionTensors(SESSION, "A", t.x, t.y, t.neuron_mask, t.unit_index, labels.copy(), np.arange(n))
+    t2.labels[val_idx] = np.where(t2.labels[val_idx] == 1, 2, 1)
+    m2 = build_model(cfg, [t2], "cpu", splits).eval()
+    with torch.no_grad():
+        o1, o2 = m1(xx, SESSION), m2(xx, SESSION)
+    assert torch.allclose(o1.logits, o2.logits, atol=1e-6)
+    # Ignore (index 0) was not fitted: its logit is the log-prior offset, far below the two fitted classes on lick trials
+    assert float(o1.logits[labels != 0, 0].max()) < float(o1.logits[labels != 0, 1:].max()) - 2.0
+    assert float(o1.logits[:, 0].std()) < 1e-6                           # no weights on the missing class

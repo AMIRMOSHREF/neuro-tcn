@@ -879,8 +879,9 @@ def test_population_channels_agree_between_data_and_data2_exports_of_the_same_re
     from delaycast.data.cache import twin_unit_order_check
     order = twin_unit_order_check(caches, dup, cfg)
     assert int(order.n_trials_checked.iloc[0]) == 14
-    assert order.frac_same_active_counts.iloc[0] == 1.0
-    assert order.frac_identical_order.iloc[0] < 1.0 and 0.0 < order.mean_frac_rows_in_order.iloc[0] < 1.0
+    assert order.frac_same_active_counts.iloc[0] == 1.0 and order.frac_rows_identified.iloc[0] == 1.0
+    assert order.frac_identical_order.iloc[0] < 1.0
+    assert order.order_consistency.iloc[0] < 0.9                       # a fresh permutation per trial: no fixed order
 
 
 # ----------------------------------------------------------------------------- spike-time reference
@@ -1006,4 +1007,5 @@ def test_twin_unit_order_check_detects_preserved_order(tmp_path):
     dup = find_duplicate_sessions(caches)
     order = twin_unit_order_check(caches, dup, cfg)
     assert order.frac_same_active_counts.iloc[0] == 1.0 and order.frac_identical_order.iloc[0] == 1.0
-    assert order.mean_frac_rows_in_order.iloc[0] == 1.0
+    assert order.frac_rows_identified.iloc[0] == 1.0 and order.order_consistency.iloc[0] == 1.0
+    assert order.rho_pos_vs_unit_id.iloc[0] > 0.99

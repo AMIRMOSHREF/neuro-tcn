@@ -122,11 +122,19 @@ selectivity cancels inside a channel, and the top-ranked channels of a region ar
 units keep their rank from trial to trial). With 8 groups the first run gave 0.75 Left/Right accuracy on the
 `Data` sessions against 0.96 for their unit-level runs — that gap is what the pooling costs.
 
-`cache` also prints, for the three recordings present in both trees, whether the `Data2` rows are the `Data` units
-minus the silent ones **in the same order**. If that check reads 1.0, unit identity is recoverable for the seven
-`Data2`-only sessions by sequence alignment (the active units of every trial are a subsequence of one fixed unit
-table) and no NWB re-export is needed; `inspect --npz-detail` prints the `session_path` the export came from, which is
-where the NWB files live.
+`cache` also prints, for the three recordings present in both trees, a unit-order table: every `Data2` row is
+identified by its spike train, and the table says whether the rows keep the `Data` order (`frac_identical_order`),
+whether they keep **one fixed order from trial to trial** (`order_consistency`: 1.0 means identity is recoverable
+for the seven `Data2`-only sessions by sequence alignment, about 0.5 means the order is re-drawn per trial and nothing
+can be aligned) and what they are sorted by (`rho_pos_vs_unit_id / rate / first_spike`). On the real data the rows
+are the same active units as `Data` but not in `Data` order. `inspect --npz-detail` prints the `session_path` the
+export came from (`sub-<id>/<session>_behavior+ecephys+image+ogen.nwb`, the DANDI layout): if those `.nwb` files are on
+disk, `scripts\export_nwb_trials.py --nwb-dir <root of the sub-* folders>` gives unit IDs for every trial, and that is
+the direct route to unit-level results on all 11 sessions:
+
+```powershell
+Get-ChildItem C:\PythonProject\Rodent -Recurse -Filter *.nwb | Select-Object FullName
+```
 
 What it can and cannot test: the channels are *not neurons*, so there is nothing to select — every arm uses all
 channels, `select` and Figure 1 are skipped (Figure 2 shows the time-frequency content of all channels) and the report
@@ -269,9 +277,13 @@ The first report on the four `Data` sessions changed four rules; every one is do
 * **after the second population run**: the wide path is **warm-started at the tuned logistic regression** on the
   training trials (`model.skip_init: logreg`; the deep head starts at zero, so the network begins exactly as the
   linear decoder and training can only add to it — jointly trained from zero it had stopped 1.9 points below the same
-  decoder fitted by sklearn), and the forecast starts at each unit's mean log-rate and is capped at log 255 (from a
-  zero start the population channels' forecast stayed far below the PSTH null within early stopping, and one runaway
-  channel could dominate a region's deviance).
+  decoder fitted by sklearn), and the forecast starts at each unit's training PSTH (a log-rate template per target
+  bin, exactly the null it is scored against) and is capped at log 255 (from a zero start the population channels'
+  forecast stayed far below the null within early stopping, and one runaway channel could dominate a region's
+  deviance). The first warm-start version fitted on train + validation trials, which made the validation
+  cross-entropy optimistic and early stopping keep an overfit read-out (the 32-group run ended 2.4 points below the
+  properly fitted linear decoder); it now uses the training (+ adaptation) trials only, and a class with fewer than
+  two training trials is left out of the fit with a log-prior logit.
 
 The report also excludes sessions with an empty criteria set from criteria-arm comparisons (listed in its header,
 with K<sub>eff</sub> per session), prints, per comparison, in how many sessions the prediction replicates on the

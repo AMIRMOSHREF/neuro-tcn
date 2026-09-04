@@ -510,16 +510,24 @@ def duplicate_channel_agreement(caches: list[SessionCache], dup: pd.DataFrame, t
 
 
 def twin_unit_order_check(caches: list[SessionCache], dup: pd.DataFrame, cfg, max_trials: int = 30, tol_s: float = 1e-3) -> pd.DataFrame:
-    """Does the Data2 export list, per region, exactly the active units of the Data export *in the same order*?
+    """Is unit identity recoverable for the Data2-only sessions from the *order* of their rows?
 
-    The Data2 files carry no unit IDs; if their rows are the Data rows minus the silent units, in Data order, then
-    unit identity is recoverable for the seven Data2-only sessions by sequence alignment (active units are a
-    subsequence of a fixed unit table) and no NWB re-export is needed.  Checked on the recordings present in both
-    trees, trial by trial: the Data units with at least one spike in the file are compared, position by position,
-    with the Data2 spike trains (Data2 times shifted onto the Data time base).  Reports, per pair, the fraction of
-    matched trials whose active-unit counts agree in every region, whose rows agree in order in every region, and
-    the mean fraction of rows that match in order."""
-    from .rasters import read_epochs, spikes_by_region
+    The Data2 files carry no unit IDs.  On the recordings present in both trees every Data2 row can be identified
+    by its spike train (identical to one Data unit's train once the time base is shared), which gives, per trial,
+    the sequence of true unit IDs in Data2 row order.  Three things are then measured, per twin pair, over up to
+    ``max_trials`` matched trials:
+
+    * ``frac_identical_order``: the Data2 rows are the Data units minus the silent ones **in Data order**
+      (identity = position after dropping silent units);
+    * ``order_consistency``: across consecutive trials, the units present in both are in the same relative order
+      (mean fraction of adjacent pairs that keep their order).  1.0 means the export writes units in one fixed
+      order per session (Data's or another) and identity is recoverable by sequence alignment; a value near 0.5
+      means the order is re-drawn per trial (e.g. sorted by something trial-dependent) and nothing can be aligned;
+    * ``rho_pos_vs_{unit_id, rate, first_spike}``: Spearman correlation of a row's position with the unit's ID,
+      its spike count in the trial and its first spike time - which of them the export sorted by.
+    """
+    from scipy.stats import spearmanr
+    from .rasters import read_epochs, resolve_spike_time_reference, spikes_by_region
     by = {c.session: c for c in caches}
     rows = []
     for _, d in dup.iterrows():
@@ -528,7 +536,10 @@ def twin_unit_order_check(caches: list[SessionCache], dup: pd.DataFrame, cfg, ma
             continue
         ta = pd.to_numeric(a.meta.get("ep_delay_start_times"), errors="coerce").to_numpy(dtype=float)
         tb = pd.to_numeric(b.meta.get("ep_delay_start_times"), errors="coerce").to_numpy(dtype=float)
-        n, n_counts, n_order, fracs = 0, 0, 0, []
+        n = n_counts = n_order = 0
+        n_rows = n_ident = 0
+        prev_seq: dict[str, np.ndarray] = {}
+        consist, rho_id, rho_rate, rho_first = [], [], [], []
         for i, t in enumerate(ta):
             if n >= max_trials or not np.isfinite(t):
                 continue
@@ -540,47 +551,65 @@ def twin_unit_order_check(caches: list[SessionCache], dup: pd.DataFrame, cfg, ma
                 da = np.load(a.meta.npz_path.iloc[i], allow_pickle=True)
                 db = np.load(b.meta.npz_path.iloc[j], allow_pickle=True)
                 ra, rb = spikes_by_region(da), spikes_by_region(db)
+                ep_a, ep_b = read_epochs(da), read_epochs(db)
+                win = (float(ep_a["delay_start_times"]) - 3.0, float(ep_a["go_start_times"]) + 3.0)
+                ra, _ = resolve_spike_time_reference(ra, ep_a, win)
+                rb, _ = resolve_spike_time_reference(rb, ep_b, win)
             except Exception:
                 continue
-            ep_a, ep_b = read_epochs(da), read_epochs(db)
-            shift = 0.0
-            # put both on the same time base: compare relative to each file's trial start when both have it
-            t0a, t0b = float(ep_a.get("trial_start", np.nan)), float(ep_b.get("trial_start", np.nan))
             n += 1
-            same_counts, same_order, matched, total = True, True, 0, 0
+            same_counts, same_order = True, True
             for r in REGIONS:
-                ua = [np.asarray(u, dtype=float) for u in ra[r][0]]
-                ua = [u for u in ua if u.size]                                   # Data: every unit listed, keep the active ones
-                ub = [np.asarray(u, dtype=float) for u in rb[r][0]]
+                ua_all = [(int(uid), np.asarray(u, dtype=float)) for u, uid in zip(ra[r][0], ra[r][1])]
+                ua = [(uid, u) for uid, u in ua_all if u.size]
+                ub = [np.asarray(v, dtype=float) for v in rb[r][0]]
                 if len(ua) != len(ub):
-                    same_counts = False
-                for u, v in zip(ua, ub):
-                    total += 1
-                    if u.size != v.size:
-                        same_order = False
-                        continue
-                    # candidate time bases of the Data2 train: absolute, or relative to trial start (either file's)
-                    ok = False
-                    for base in (0.0, t0b, t0a):
-                        if np.isfinite(base) and np.allclose(np.sort(u), np.sort(v) + base, atol=tol_s):
-                            ok = True
-                            break
-                    if not ok and np.isfinite(t0a) and np.allclose(np.sort(u) - t0a, np.sort(v), atol=tol_s):
-                        ok = True
-                    matched += int(ok)
-                    same_order &= ok
-                if len(ua) != len(ub):
+                    same_counts = same_order = False
+                key = lambda arr: np.round(np.sort(arr), 3).tobytes()
+                lookup: dict[bytes, tuple[int, int]] = {}
+                for k_pos, (uid, u) in enumerate(ua):
+                    lookup.setdefault(key(u), (uid, k_pos))
+                ids, pos_in_data = [], []
+                for v in ub:
+                    hit = lookup.get(key(v))
+                    ids.append(hit[0] if hit else -1)
+                    pos_in_data.append(hit[1] if hit else -1)
+                ids, pos_in_data = np.asarray(ids), np.asarray(pos_in_data)
+                n_rows += len(ub)
+                n_ident += int((ids >= 0).sum())
+                if not (len(ua) == len(ub) and (pos_in_data == np.arange(len(ub))).all()):
                     same_order = False
-                    total += abs(len(ua) - len(ub))
+                ok = ids >= 0
+                if ok.sum() >= 3:
+                    pos = np.arange(len(ub))[ok]
+                    rates = np.array([ub[k].size for k in np.flatnonzero(ok)], dtype=float)
+                    firsts = np.array([ub[k].min() for k in np.flatnonzero(ok)], dtype=float)
+                    for store, val in ((rho_id, ids[ok]), (rho_rate, rates), (rho_first, firsts)):
+                        rho = spearmanr(pos, val).correlation if np.unique(val).size > 1 else np.nan
+                        if np.isfinite(rho):
+                            store.append(float(rho))
+                    seq = ids[ok]
+                    if r in prev_seq:
+                        common = np.intersect1d(seq, prev_seq[r])
+                        if common.size >= 3:
+                            pa = {u: k for k, u in enumerate(prev_seq[r])}
+                            order_now = [u for u in seq if u in pa]                    # common units in this trial's order
+                            prev_pos = np.array([pa[u] for u in order_now])
+                            consist.append(float(np.mean(np.diff(prev_pos) > 0)))
+                    prev_seq[r] = seq
             n_counts += int(same_counts)
             n_order += int(same_order)
-            fracs.append(matched / max(total, 1))
         rows.append({"session_a": d.session_a, "session_b": d.session_b, "n_trials_checked": n,
+                     "frac_rows_identified": n_ident / n_rows if n_rows else float("nan"),
                      "frac_same_active_counts": n_counts / n if n else float("nan"),
                      "frac_identical_order": n_order / n if n else float("nan"),
-                     "mean_frac_rows_in_order": float(np.mean(fracs)) if fracs else float("nan")})
-    return pd.DataFrame(rows, columns=["session_a", "session_b", "n_trials_checked", "frac_same_active_counts",
-                                       "frac_identical_order", "mean_frac_rows_in_order"])
+                     "order_consistency": float(np.mean(consist)) if consist else float("nan"),
+                     "rho_pos_vs_unit_id": float(np.mean(rho_id)) if rho_id else float("nan"),
+                     "rho_pos_vs_rate": float(np.mean(rho_rate)) if rho_rate else float("nan"),
+                     "rho_pos_vs_first_spike": float(np.mean(rho_first)) if rho_first else float("nan")})
+    return pd.DataFrame(rows, columns=["session_a", "session_b", "n_trials_checked", "frac_rows_identified", "frac_same_active_counts",
+                                       "frac_identical_order", "order_consistency", "rho_pos_vs_unit_id", "rho_pos_vs_rate",
+                                       "rho_pos_vs_first_spike"])
 
 
 def _delay_onsets(c: SessionCache) -> np.ndarray:
