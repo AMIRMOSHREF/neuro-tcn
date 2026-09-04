@@ -20,9 +20,11 @@ $ErrorActionPreference = "Stop"
 $common = @("--set", "data.data_a_root=$DataA", "--set", "data.data_b_root=$DataB",
             "--set", "output_dir=$OutputDir", "--set", "data.cache_dir=$CacheDir")
 
-function Step($name, $args) {
+# NB: the parameter must not be called $args - that is a PowerShell automatic variable and would be empty here.
+function Step([string]$name, [string[]]$cmdArgs) {
     Write-Host "`n=== $name" -ForegroundColor Cyan
-    & python -m delaycast @args
+    Write-Host "python -m delaycast $($cmdArgs -join ' ')" -ForegroundColor DarkGray
+    & python -m delaycast @cmdArgs
     if ($LASTEXITCODE -ne 0) { throw "step '$name' failed (exit $LASTEXITCODE)" }
 }
 
