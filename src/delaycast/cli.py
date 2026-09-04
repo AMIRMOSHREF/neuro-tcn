@@ -163,11 +163,16 @@ def _npz_detail(recs) -> None:
 
 
 def cmd_cache(cfg: Config, args) -> None:
-    from .data.cache import _cache_key, build_cache, cache_summary, find_duplicate_sessions
+    from .data.cache import _cache_key, build_cache, cache_summary, excluded_sessions, find_duplicate_sessions
     caches = build_cache(cfg, force=args.force)
     pd.set_option("display.width", 250)
     summ = cache_summary(caches)
     print(summ.to_string(index=False))
+    excl = excluded_sessions(cfg)
+    if len(excl):
+        print(f"\nEXCLUDED at cache time ({len(excl)} session(s), no per-unit analysis possible):")
+        print(excl[["session", "n_discovered", "n_unit_count_mismatch", "reason"]].to_string(index=False))
+        print("fix: " + str(excl.fix.iloc[0]))
     if "MB" in summ:
         print(f"total in RAM: {summ.MB.sum():.0f} MB (uint8 counts)")
     min_trials = int(cfg.data.get_path("min_trials_per_session", 30))
@@ -179,7 +184,7 @@ def cmd_cache(cfg: Config, args) -> None:
         print(bad[["session", "discovered", "n_trials", "Ignore", "Left", "Right", "drop_reasons", "licks", "lick_labels", "align"]].to_string(index=False))
         print("(licks = where the lick record came from; lick_labels = class implied by that record, I/L/R/B/u = Ignore/Left/Right/Both/unknown)")
         print(f"per-trial reasons: {Path(cfg.data.cache_dir) / _cache_key(cfg) / 'qc_log.csv'}")
-    dup = find_duplicate_sessions(caches, keep=str(cfg.data.get_path("duplicate_keep", "B")).upper())
+    dup = find_duplicate_sessions(caches, keep=str(cfg.data.get_path("duplicate_keep", "A")).upper())
     dup.to_csv(Path(cfg.data.cache_dir) / _cache_key(cfg) / "duplicate_sessions.csv", index=False)
     if len(dup):
         print("\nDUPLICATE RECORDINGS (same trials in Data and Data2; the `dropped` copy is ignored by every later command):")
@@ -234,11 +239,13 @@ def _train_one(cfg: Config, mode: str, variant: str, seed: int, kind: str, cache
         cfg_v.set_path("model.spectral_branch", "popmean")
     elif variant:
         raise SystemExit(f"unknown variant {variant!r} (nospec | popmean)")
-    if not holdouts:
+    if holdouts is None:
         d = run_dir(cfg.output_dir, kind, mode, variant, seed)
         log.info("=== run %s/%s%s seed %d -> %s", kind, mode, f"_{variant}" if variant else "", seed, d)
         run = run_training(cfg_v, mode=mode, out_dir=d, caches=caches, negative_control=negative_control)
         evaluate_run(run, cfg_v, caches)
+        return
+    if not holdouts:   # an empty plan (e.g. cross_dataset with one dataset): nothing to train, already logged
         return
     for tag, sessions in holdouts.items():
         d = run_dir(cfg.output_dir, kind, mode, variant, seed, holdout_tag=tag)
@@ -269,7 +276,9 @@ def _holdout_plan(cfg: Config, caches: dict, args) -> tuple[str, dict[str, list[
         for s in caches:
             by_ds.setdefault(_dataset_of(s), []).append(s)
         if len(by_ds) < 2:
-            raise SystemExit("cross_dataset needs sessions from both Data (A/...) and Data2 (B/...)")
+            log.warning("cross_dataset SKIPPED: it needs usable sessions from both Data (A/...) and Data2 (B/...), "
+                        "but only %s is present after QC (see `python -m delaycast cache`)", sorted(by_ds))
+            return "cross_dataset", {}
         return "cross_dataset", {ds: sess for ds, sess in sorted(by_ds.items())}
     raise SystemExit(f"unknown train.eval_mode {mode!r}")
 

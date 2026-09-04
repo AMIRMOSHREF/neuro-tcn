@@ -46,7 +46,10 @@ the upcoming action** — and whether that answer is the same across recordings.
   NPZ is a row of zeros (it was silent). IDs only need to be unique within a region (probe-local cluster numbers that
   repeat across hemispheres are fine). Without usable IDs (pre-split schema, an ID repeated inside one region, or
   `unit_ids` and `brain_region` of different length) identity is positional and a trial whose unit count differs from
-  the first kept trial's is dropped; `cache` prints the reason in the `align` column. The cache JSON records the alignment mode and how many units each
+  the first kept trial's is dropped; when that happens in more than 20 % of a session's trials the session is
+  **excluded** (`unit_identity_unavailable`) because its export lost unit identity — the `Data2` trial files are of
+  this kind (units that fired in the trial only, no IDs) and must be re-exported from NWB with the `Data` schema
+  (`scripts/export_nwb_trials.py`); `cache` prints the reason and the fix. The cache JSON records the alignment mode and how many units each
   trial contributed versus the union.
 * **NPZ-level QC** (both datasets): licks before the go cue → drop; folder label contradicted by the lick record
   (NPZ arrays, else log row) or licks on both sides → drop; a trial with **no lick record anywhere** keeps its folder
@@ -60,9 +63,10 @@ the upcoming action** — and whether that answer is the same across recordings.
   trials, one class, or no validation trials) instead of producing a NaN validation curve.
 * **Duplicate recordings**: `Data/Session2-4` and three `Data2` sessions are the same recordings extracted twice
   (identical trial counts, class counts and absolute delay-onset timestamps). `cache` detects such pairs by their
-  epoch-timestamp fingerprint and every later command uses only one copy (`data.duplicate_keep`, default the `Data2`
-  copy with the audited log; the table lists the unit counts of both exports), so no trial can sit in the training
-  set of one copy and the test set of the other, and cross-dataset transfer is a real transfer.
+  epoch-timestamp fingerprint and every later command uses only one copy (`data.duplicate_keep`, default the `Data`
+  copy: complete unit table with IDs, NPZ lick times, identical class labels; the table lists the unit counts of both
+  exports), so no trial can sit in the training set of one copy and the test set of the other, and cross-dataset
+  transfer is a real transfer.
 * Spikes are binned once into **uint8** count tensors (context 10 ms, right-aligned at the go cue; target 50 ms,
   left-aligned at go) and cached per session; ≈ 100 MB per real session in RAM.
 

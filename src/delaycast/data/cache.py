@@ -135,11 +135,26 @@ def _csv_flags(rec: TrialRecord, cfg) -> tuple[bool, str]:
     return True, ""
 
 
+LOADER_VERSION = 3
+"""Bumped on EVERY change of the trial loader / QC rules: it is part of the cache key, so an old cache can never be
+read by a newer loader (v2: unit alignment by ID, log lick times, miss trials kept; v3: empty NPZ lick arrays defer to
+the log, sessions without unit identity excluded)."""
+
+
 def _cache_key(cfg) -> str:
     c = cfg.data
-    # ``_v2``: unit alignment by ID, lick times from the behavioural log, miss trials kept - caches built by the
-    # positional loader are not comparable and are rebuilt automatically.
-    return f"bin{c.bin_ms}_tbin{c.target_bin_ms}_ctx{int(c.context.include_sample)}_{c.context.pre_delay_ms}_resp{c.target.response_ms}_v2"
+    return (f"bin{c.bin_ms}_tbin{c.target_bin_ms}_ctx{int(c.context.include_sample)}_{c.context.pre_delay_ms}"
+            f"_resp{c.target.response_ms}_v{LOADER_VERSION}")
+
+
+# A session whose NPZs carry no unit identity (pre-split arrays without IDs) and whose unit count changes from
+# trial to trial cannot be used: nothing says which row of trial t is which row of trial t+1, and every per-unit
+# statistic would silently mix units.  Above this fraction of mismatching trials the session is excluded at cache time.
+MAX_POSITIONAL_MISMATCH_FRAC = 0.2
+UNIT_IDENTITY_FIX = ("the NPZ export lists only the units that fired in each trial and carries no unit_ids, so unit "
+                     "identity across trials is lost; re-export the session from its NWB file with `unit_ids` + "
+                     "`brain_region` + `spike_times` for ALL units (scripts/export_nwb_trials.py, or the exporter that "
+                     "produced Data/Session*), then delete the cache")
 
 
 def _unit_universe(recs: list[TrialRecord]) -> tuple[dict[str, np.ndarray] | None, dict]:
@@ -214,6 +229,7 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
 
     caches: list[SessionCache] = []
     qc_rows = []
+    excluded_rows = []
     for sess, recs in by_session.items():
         out_path = cache_dir / (sess.replace("/", "__") + ".npz")
         if out_path.exists() and not force:
@@ -262,7 +278,8 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
                     n_r, n_ref = len(tr.unit_ids[r]), len(uids[r])
                     if n_r != n_ref:
                         keep, reason = False, f"unit_count_mismatch:{r}:{n_r}!={n_ref}"
-                        log.warning("%s trial %s: %s (trial dropped)", sess, rec.trial, reason)
+                        if drop_reasons.get("unit_count_mismatch", 0) < 3:
+                            log.warning("%s trial %s: %s (trial dropped; further mismatches of this session are only counted)", sess, rec.trial, reason)
                         break
             qc_rows.append({"session": sess, "trial": rec.trial, "label": rec.label, "kept": keep, "reason": reason,
                             "n_unknown_region": tr.qc["n_unknown_region"], "delay_len_s": delay_len_s,
@@ -308,6 +325,14 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
                          "csv_outcome": str(rec.csv.get("outcome", "")) if rec.csv else "",
                          "csv_instruction": str(rec.csv.get("trial_instruction", "")) if rec.csv else "",
                          **{f"ep_{k}": v for k, v in tr.epochs.items()}})
+        n_mismatch = drop_reasons.get("unit_count_mismatch", 0)
+        if unit_index is None and len(recs) >= 10 and n_mismatch > MAX_POSITIONAL_MISMATCH_FRAC * len(recs):
+            log.error("session %s EXCLUDED: unit count differs from the first trial's in %d of %d trials and %s",
+                      sess, n_mismatch, len(recs), UNIT_IDENTITY_FIX)
+            excluded_rows.append({"session": sess, "n_discovered": len(recs), "n_unit_count_mismatch": n_mismatch,
+                                  "reason": "unit_identity_unavailable", "fix": UNIT_IDENTITY_FIX,
+                                  "alignment_note": align_info.get("unit_alignment_note", "")})
+            continue
         if not labels:
             log.warning("session %s has no trials after QC (%s)", sess,
                         ", ".join(f"{k}: {v}" for k, v in sorted(drop_reasons.items(), key=lambda kv: -kv[1])) or "no trials discovered")
@@ -334,7 +359,18 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
         caches.append(sc)
     if qc_rows:
         pd.DataFrame(qc_rows).to_csv(cache_dir / "qc_log.csv", index=False)
+    if excluded_rows or not (cache_dir / "excluded_sessions.csv").exists():
+        pd.DataFrame(excluded_rows, columns=["session", "n_discovered", "n_unit_count_mismatch", "reason", "fix", "alignment_note"]) \
+            .to_csv(cache_dir / "excluded_sessions.csv", index=False)
     return caches
+
+
+def excluded_sessions(cfg) -> pd.DataFrame:
+    """Sessions the cache builder refused (with the reason and the fix); empty when none."""
+    p = Path(cfg.data.cache_dir) / _cache_key(cfg) / "excluded_sessions.csv"
+    if not p.is_file():
+        return pd.DataFrame(columns=["session", "n_discovered", "n_unit_count_mismatch", "reason", "fix", "alignment_note"])
+    return pd.read_csv(p)
 
 
 def _fit_len(a: np.ndarray, n: int, align: str = "right") -> np.ndarray:
@@ -362,7 +398,7 @@ def _first_lick(tr) -> float:
     return float(licks.min() - go) if licks.size else float("nan")
 
 
-def find_duplicate_sessions(caches: list[SessionCache], tol_s: float = 0.002, min_overlap: float = 0.9, keep: str = "B") -> pd.DataFrame:
+def find_duplicate_sessions(caches: list[SessionCache], tol_s: float = 0.002, min_overlap: float = 0.9, keep: str = "A") -> pd.DataFrame:
     """Sessions that appear in both ``Data`` (dataset A) and ``Data2`` (dataset B).
 
     The two on-disk trees were extracted from the same NWB recordings, so a session can be present twice.
@@ -370,9 +406,10 @@ def find_duplicate_sessions(caches: list[SessionCache], tol_s: float = 0.002, mi
     ``tol_s``) for at least ``min_overlap`` of the trials of the smaller session - a fingerprint that cannot
     match by chance. Training on both copies would leak trials between the training and test sets, and
     "cross-dataset transfer" would be tested on the training recordings, so ``load_cache`` drops one copy
-    (``keep`` = ``data.duplicate_keep``: ``B`` keeps the Data2 copy with the audited behavioural log, ``A`` the
-    Data copy) unless ``data.drop_duplicate_sessions`` is false.  The table lists the unit counts of both copies
-    because the two exports curate units differently.
+    (``keep`` = ``data.duplicate_keep``: ``A`` keeps the Data copy - complete unit table with IDs and NPZ lick times,
+    identical class labels - ``B`` the Data2 copy with the audited behavioural log) unless
+    ``data.drop_duplicate_sessions`` is false.  The table lists the unit counts of both copies because the two exports
+    curate units differently.
     """
     rows = []
     a_caches = [c for c in caches if c.dataset == "A"]
@@ -405,7 +442,7 @@ def _delay_onsets(c: SessionCache) -> np.ndarray:
 
 
 def drop_duplicate_sessions(caches: list[SessionCache], cfg, report_path: Path | None = None) -> list[SessionCache]:
-    dup = find_duplicate_sessions(caches, keep=str(cfg.data.get_path("duplicate_keep", "B")).upper())
+    dup = find_duplicate_sessions(caches, keep=str(cfg.data.get_path("duplicate_keep", "A")).upper())
     if report_path is not None:
         report_path.parent.mkdir(parents=True, exist_ok=True)
         dup.to_csv(report_path, index=False)

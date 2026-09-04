@@ -11,7 +11,8 @@ data:
   use_dataset_b: true
   cache_dir: "cache"         # binned per-session tensors are stored here (safe to delete)
   drop_duplicate_sessions: true   # a session present in both Data and Data2 (same recording) is used once
-  duplicate_keep: B          # which copy of a duplicated recording is kept: B (Data2, audited log) | A (Data)
+  duplicate_keep: A          # which copy of a duplicated recording is kept: A (Data: every unit with IDs, NPZ lick times,
+                             # same class labels) | B (Data2: audited log, but its NPZs list only units that fired per trial)
   min_trials_per_session: 30 # sessions with fewer trials after QC are excluded from every command (a loading problem, not a small recording)
   min_trials_per_lick_class: 5   # ... and sessions with fewer Left or Right trials
   bin_ms: 10                 # raster bin width used for the model input (delay/context)

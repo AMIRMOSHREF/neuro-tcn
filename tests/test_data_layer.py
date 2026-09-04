@@ -567,8 +567,12 @@ def test_duplicate_sessions_are_detected_and_dropped():
     b = make("B/sub-1_ses-x", "B", onsets)
     dup = find_duplicate_sessions([a_dup, a_other, b])
     assert list(dup.session_a) == ["A/Session2"] and list(dup.session_b) == ["B/sub-1_ses-x"]
+    assert list(dup.dropped) == ["B/sub-1_ses-x"] and "units_a" in dup and "units_b" in dup
     kept = drop_duplicate_sessions([a_dup, a_other, b], load_config(None))
-    assert sorted(c.session for c in kept) == ["A/Session1", "B/sub-1_ses-x"]
+    assert sorted(c.session for c in kept) == ["A/Session1", "A/Session2"]
+    cfg_b = load_config(None)
+    cfg_b.set_path("data.duplicate_keep", "B")
+    assert sorted(c.session for c in drop_duplicate_sessions([a_dup, a_other, b], cfg_b)) == ["A/Session1", "B/sub-1_ses-x"]
 
 
 def test_positional_alignment_without_unit_ids_drops_mismatched_trials(tmp_path, caplog):
@@ -711,3 +715,24 @@ def _without_units_at(payload: dict, positions: list[int]) -> dict:
     out["brain_region"] = np.asarray(payload["brain_region"])[keep]
     out["spike_times"] = _object_array([s for s, k in zip(payload["spike_times"], keep) if k])
     return out
+
+
+def test_session_without_unit_identity_is_excluded(tmp_path, caplog):
+    """Pre-split NPZs with no IDs whose unit count keeps changing (the real Data2 export) are refused with the fix."""
+    from delaycast.data.cache import excluded_sessions
+
+    rng = np.random.default_rng(9)
+    base = {"ALM_L": 3, "ALM_R": 2, "STR_L": 2, "STR_R": 1}
+    for i in range(1, 13):
+        cls = ["Left", "Right"][i % 2]
+        n = dict(base, ALM_L=3 + (i % 3))          # 3, 4, 5, 3, 4, 5 ... -> two thirds of the trials mismatch
+        _write_b(tmp_path, i, cls, _to_split(_payload(rng, n, cls, t0=10.0 * i)))
+    cfg = _cfg(tmp_path)
+    with caplog.at_level(logging.ERROR, logger="delaycast.data.cache"):
+        caches = build_cache(cfg, force=True)
+    assert caches == []
+    assert any("EXCLUDED" in r.message and "unit identity" in r.message for r in caplog.records)
+    excl = excluded_sessions(cfg)
+    assert list(excl.session) == ["B/sub-1_ses-20190301T120000"] and excl.reason.iloc[0] == "unit_identity_unavailable"
+    assert int(excl.n_unit_count_mismatch.iloc[0]) == 8 and "re-export" in excl.fix.iloc[0]
+    assert not list((tmp_path / "cache").rglob("B__*.npz"))

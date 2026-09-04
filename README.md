@@ -50,18 +50,40 @@ python -m delaycast all --quick                   # sanity run, then: python -m 
 `scripts\run_delaycast.ps1` runs the whole protocol step by step (`-Quick` for the sanity run). Outputs go to
 `outputs\delaycast\` and the binned cache to `cache\` inside the folder you run from.
 
-`cache` prints, per session, how many trials were discovered, kept and dropped (with the reasons), how lick times were
-obtained (`Data`: NPZ arrays; `Data2`: the audited log — its NPZ lick arrays are empty on lick trials) and how units were aligned (`Data2` NPZs
-list only the units that fired in the trial, so rows are aligned by `unit_ids`). It also reports **duplicate
-recordings**: `Data/Session2-4` are the same recordings as three `Data2` sessions (same trials, same epoch
-timestamps). Only one copy is used afterwards (`data.duplicate_keep`, default the `Data2` copy), so the real corpus is
-`Data/Session1` plus the 10 `Data2` sessions. Sessions that lose most of their trials in QC, or end with fewer than
-30 trials / 5 Left / 5 Right, are excluded from every command with a warning — that is a loading problem to fix, not
-a small recording. After pulling a loader change, delete stale runs before re-running the protocol:
+`cache` prints, per session, how many trials were discovered, kept and dropped (with the reasons), where the lick
+record came from (`Data`: NPZ arrays; `Data2`: the audited log — its NPZ lick arrays are empty on lick trials) and how
+units were aligned. It also reports **duplicate recordings**: `Data/Session2-4` are the same recordings as three
+`Data2` sessions (same trials, same epoch timestamps); only one copy is used afterwards (`data.duplicate_keep`, default
+the `Data` copy, which has every unit with its ID). Sessions that lose most of their trials in QC, or end with fewer
+than 30 trials / 5 Left / 5 Right, are excluded from every command with a warning. The binned cache is keyed by a
+loader version and rebuilds itself after a loader change; delete stale runs before re-running the protocol:
 
 ```powershell
-Remove-Item -Recurse -Force outputs\delaycast\runs, cache\selection   # the binned cache rebuilds itself (versioned key)
+if (Test-Path outputs\delaycast\runs) { Remove-Item -Recurse -Force outputs\delaycast\runs }
+if (Test-Path cache\selection)       { Remove-Item -Recurse -Force cache\selection }
 ```
+
+### The `Data2` NPZ export has no unit identity — re-export it from NWB
+
+The `Data2` trial files (`left_ALM_spikes`, `right_ALM_spikes`, … object arrays) contain **only the units that fired
+in that trial and no unit IDs**: the unit count changes from trial to trial (e.g. 1371 → 1551 within one session)
+and nothing says which row of one trial is which row of the next. No per-unit analysis is possible on such files, so
+`cache` **excludes** those sessions (`EXCLUDED at cache time … unit_identity_unavailable`) instead of silently mixing
+units; `cache/<key>/excluded_sessions.csv` lists them. The three `Data2` sessions that duplicate `Data/Session2-4`
+are covered by their `Data` copies (complete unit table with IDs). For the other seven sessions, re-export the trials
+from the NWB files with the `Data` schema (`unit_ids` + `brain_region` + `spike_times` for **all** units, lick
+times, epoch scalars) — either with the exporter that produced `Data/Session*`, or with the bundled one:
+
+```powershell
+pip install pynwb
+python scripts\export_nwb_trials.py --nwb-dir D:\nwb_files --out C:\PythonProject\Rodent\Data2_units --log-dir C:\PythonProject\Rodent\Data2
+python -m delaycast inspect --npz-detail --set data.data_b_root=C:/PythonProject/Rodent/Data2_units
+python -m delaycast cache --set data.data_b_root=C:/PythonProject/Rodent/Data2_units
+```
+
+(`--log-dir` picks up each session's audited log for labels and lick times; set `data.data_b_root` in
+`configs/delaycast.yaml` to the new folder afterwards.) Until then the corpus is the four `Data` sessions, and
+`cross_dataset` transfer is skipped with a warning.
 
 ## Commands (real data)
 
