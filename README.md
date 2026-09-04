@@ -129,4 +129,5 @@ per epoch over ≈ 4500 training trials; a 60-epoch run is ≈ 30–60 min (earl
 ≈ 10 min. cache ≈ 15 min once; select ≈ 45 min once (cached per split afterwards). The full `all` protocol (3 seeds ×
 4 arms + cross-dataset + negative control ≈ 15 runs) is therefore an overnight CPU job or ≈ 1 h on a GPU
 (`train.device: auto`); `all --quick` (one seed, within-session only) is ≈ 1–2 h on CPU. RAM ≈ 1.5 GB for all
-session caches (uint8) + model.
+session caches (uint8) + model. The CLI uses every core unless `OMP_NUM_THREADS` is set; run one job at a time on a
+CPU workstation (two PyTorch processes oversubscribing the cores slow each other down many-fold).
