@@ -85,3 +85,11 @@ def test_short_session_labels():
     from delaycast.figures._fig_common import short_session
     assert short_session("A/Session1") == "A-S1"
     assert short_session("B/sub-440957_ses-20190211T143614") == "B-440957-0211"
+
+
+def test_per_session_dict_seed_mean_accepts_nested_deltas():
+    """Region ablation rows store {session: {delta_balanced_accuracy, delta_balanced_accuracy_lr}}; older rows store a scalar."""
+    from delaycast.figures._fig_common import per_session_dict_seed_mean
+    out = per_session_dict_seed_mean([{"A/S1": -0.10, "A/S2": {"delta_balanced_accuracy": -0.20, "delta_balanced_accuracy_lr": -0.25}},
+                                      {"A/S1": -0.30, "A/S2": {"delta_balanced_accuracy": -0.40, "delta_balanced_accuracy_lr": -0.45}}])
+    assert abs(out["A/S1"] + 0.20) < 1e-9 and abs(out["A/S2"] + 0.30) < 1e-9

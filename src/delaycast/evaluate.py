@@ -563,7 +563,11 @@ def evaluate_run(run: dict, cfg, caches: dict | None = None) -> dict:
                 else:
                     o = _forward_chunks(model, b["x"], s, b["mask"], device, drop_region=r_drop)
                 lg.append(o["logits"].numpy())
-                per_s[s] = metrics(lab, o["logits"].numpy())["balanced_accuracy"] - [p for p in results["per_session"] if p["session"] == s][0]["balanced_accuracy"]
+                m_s = metrics(lab, o["logits"].numpy())
+                base_s = [p for p in results["per_session"] if p["session"] == s][0]
+                # both deltas per session: the report's P5a is about Left/Right decoding and prefers the L/R delta
+                per_s[s] = {"delta_balanced_accuracy": m_s["balanced_accuracy"] - base_s["balanced_accuracy"],
+                            "delta_balanced_accuracy_lr": m_s["balanced_accuracy_lr"] - base_s["balanced_accuracy_lr"]}
             lg = np.concatenate(lg)
             m = metrics(y, lg)
             abl.append({"dropped_region": r_drop, "method": method, **{k: m[k] for k in ("balanced_accuracy", "balanced_accuracy_lr", "macro_f1", "log_loss", "recall")},

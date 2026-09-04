@@ -206,6 +206,8 @@ def per_session_dict_seed_mean(dicts: Sequence[dict | None]) -> dict[str, float]
     acc: dict[str, list[float]] = {}
     for d in dicts:
         for s, v in (d or {}).items():
+            if isinstance(v, dict):   # region ablation stores both the 3-class and the Left/Right delta per session
+                v = v.get("delta_balanced_accuracy", v.get("delta_balanced_accuracy_lr"))
             acc.setdefault(str(s), []).append(v)
     return {s: seed_stat(v)[0] for s, v in acc.items()}
 
