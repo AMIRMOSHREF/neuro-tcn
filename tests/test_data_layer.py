@@ -875,3 +875,93 @@ def test_population_channels_agree_between_data_and_data2_exports_of_the_same_re
     assert int(agree.n_matched_trials.iloc[0]) == 14
     assert agree.frac_identical_context.iloc[0] == 1.0 and agree.frac_identical_target.iloc[0] == 1.0
     assert agree.frac_same_label.iloc[0] == 1.0
+
+
+# ----------------------------------------------------------------------------- spike-time reference
+def _shift_spikes(payload: dict, fn) -> dict:
+    out = dict(payload)
+    out["spike_times"] = _object_array([fn(np.asarray(s, dtype=float)) for s in payload["spike_times"]])
+    return out
+
+
+@pytest.mark.parametrize("reference", ["absolute", "trial_start", "milliseconds"])
+def test_spike_times_on_another_time_base_are_rescaled(tmp_path, reference):
+    """Spike times relative to the trial start, or in milliseconds, give the same rasters as absolute seconds, and
+    the loader records which reference it resolved (this is how every Data2 session binned into silence)."""
+    from delaycast.data.rasters import load_trial_rasters
+
+    rng = np.random.default_rng(4)
+    pay = _payload(rng, {"ALM_L": 5, "ALM_R": 3, "STR_L": 2, "STR_R": 2}, "Left", t0=300.0)
+    t0 = float(pay["trial_start"])
+    ref_path = _write_a(tmp_path, "Session1", 1, "Left", pay)
+    cfg = _cfg(tmp_path)
+    ref = load_trial_rasters(ref_path, cfg)
+    assert ref.qc["spike_time_reference"] == "absolute"
+    fn = {"absolute": lambda s: s, "trial_start": lambda s: s - t0, "milliseconds": lambda s: s * 1000.0}[reference]
+    path = _write_a(tmp_path, "Session1", 2, "Left", _shift_spikes(pay, fn))
+    tr = load_trial_rasters(path, cfg)
+    assert tr.qc["spike_time_reference"] == reference
+    for r in REGIONS:
+        assert np.array_equal(tr.context[r], ref.context[r]) and np.array_equal(tr.target[r], ref.target[r])
+    assert int(sum(ref.context[r].sum() for r in REGIONS)) > 0
+
+
+def test_spike_times_on_an_unknown_time_base_are_refused(tmp_path):
+    from delaycast.data.rasters import load_trial_rasters
+
+    rng = np.random.default_rng(5)
+    pay = _payload(rng, {"ALM_L": 3, "ALM_R": 1, "STR_L": 1, "STR_R": 1}, "Right", t0=300.0)
+    path = _write_a(tmp_path, "Session1", 1, "Right", _shift_spikes(pay, lambda s: s + 5000.0))
+    with pytest.raises(ValueError, match="unknown time base"):
+        load_trial_rasters(path, _cfg(tmp_path))
+    # a trial without any spike is fine (nothing to decide)
+    empty = _shift_spikes(pay, lambda s: s[:0])
+    tr = load_trial_rasters(_write_a(tmp_path, "Session1", 2, "Right", empty), _cfg(tmp_path))
+    assert tr.qc["spike_time_reference"] == "none" and sum(int(tr.context[r].sum()) for r in REGIONS) == 0
+
+
+def test_data2_trial_relative_spikes_pool_into_population_channels(tmp_path):
+    """The Data2 layout (pre-split arrays, no IDs, trial-relative spikes, licks in the log) reaches the population
+    cache with non-empty channels, and the cache table says which reference was used."""
+    from delaycast.data.cache import cache_summary
+
+    rng = np.random.default_rng(6)
+    n = {"ALM_L": 4, "ALM_R": 3, "STR_L": 2, "STR_R": 2}
+    log_rows = []
+    for i in range(1, 13):
+        cls = ["Left", "Right"][i % 2]
+        pay = _payload(rng, n, cls, t0=20.0 * i)
+        t0 = float(pay["trial_start"])
+        b = _strip_licks(_to_split(_shift_spikes(pay, lambda s, t0=t0: s - t0)))
+        _write_b(tmp_path, i, cls, b)
+        licks = pay["left_lick_times"] if cls == "Left" else pay["right_lick_times"]
+        log_rows.append({"trial": i, "outcome": "hit", "trial_instruction": cls.lower(), "early_lick": "no early",
+                         "left_lick_times": str(licks.tolist()) if cls == "Left" else "[]",
+                         "right_lick_times": str(licks.tolist()) if cls == "Right" else "[]", "excluded": False, "photostim_onset": "N/A"})
+    _write_b_csv(tmp_path, log_rows)
+    cfg = _cfg(tmp_path)
+    cfg.set_path("data.representation", "population")
+    caches = build_cache(cfg, force=True)
+    assert len(caches) == 1
+    c = caches[0]
+    assert c.qc_info["spike_time_references"] == {"trial_start": 12}
+    assert c.qc_info["units_pooled"] == n
+    assert all(int(c.context[r].sum()) > 0 for r in REGIONS)
+    assert cache_summary(caches)["spike_ref"].iloc[0] == "trial_start:12"
+
+
+def test_session_without_spikes_in_the_window_is_excluded(tmp_path, caplog):
+    from delaycast.data.cache import excluded_sessions
+
+    rng = np.random.default_rng(7)
+    for i in range(1, 13):
+        cls = ["Left", "Right"][i % 2]
+        pay = _payload(rng, {"ALM_L": 3, "ALM_R": 2, "STR_L": 2, "STR_R": 1}, cls, t0=20.0 * i)
+        _write_a(tmp_path, "Session1", i, cls, _shift_spikes(pay, lambda s: s[:0]))
+    cfg = _cfg(tmp_path)
+    with caplog.at_level(logging.ERROR, logger="delaycast.data.cache"):
+        caches = build_cache(cfg, force=True)
+    assert caches == []
+    excl = excluded_sessions(cfg)
+    assert list(excl.reason) == ["no_spikes_in_window"] and "time base" in excl.fix.iloc[0]
+    assert any("no spike in the context window" in r.message for r in caplog.records)

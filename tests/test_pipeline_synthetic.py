@@ -44,7 +44,7 @@ TOP_LEVEL_KEYS = ("mode", "seed", "holdout", "eval_mode", "negative_control", "s
                   "importance_agreement", "baselines", "linear_sweep", "l1_overlap", "tau95_linear_ms")
 CLASSIFICATION_KEYS = ("accuracy", "balanced_accuracy", "balanced_accuracy_lr", "macro_f1", "log_loss", "n", "n_per_class",
                        "n_classes_present", "recall")
-BASELINE_MODELS = {"logreg_all_units", "logreg_pca50_all_units", "logreg_l1_all_units", "logreg_selected_units",
+BASELINE_MODELS = {"logreg_all_units", "logreg_pca50_all_units", "logreg_l1_all_units", "logreg_selected_units", "logreg_selected_units_windows",
                    "logreg_selected_ALM", "logreg_selected_STR", "logreg_trial_index"}
 LEAF_FILES = ("results.json", "model.pt", "splits.json", "test_predictions.csv", "attention.npz", "neuron_importance.csv",
               "history.csv", "config.yaml", "selection_funnel.csv")

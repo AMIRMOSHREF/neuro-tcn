@@ -87,7 +87,8 @@ model:
   n_heads: 4
   n_transformer_layers: 2     # causal Transformer blocks after the TCN (pre-norm MHA + FFN, causal mask)
   positional_encoding: sinusoidal  # fixed time-to-go encoding added before the Transformer: sinusoidal | learned | none
-  spectral_branch: bands      # in-model causal Gabor filterbank on the gated population: bands | popmean (matched control) | none
+  spectral_branch: learned    # in-model causal filterbank on the gated population rate: learned (Gabor-initialised quadrature
+                              # pairs, free parameters) | bands (fixed Gabor = causal STFT) | popmean (matched control) | none
   spectral_win_ms: 300        # window of the causal filterbank (past bins only)
   neuron_gate_penalty: hoyer  # scale-invariant Hoyer sparsity (hoyer) or plain L1 mass (l1)
   neuron_gate_weight: 0.1     # weight of the gate sparsity penalty (mean over regions); 0.5 pushed gates of the already
@@ -95,6 +96,10 @@ model:
   linear_skip: true           # wide path: gated, standardised mean-count read-out added to the class logits (the model
                               # then contains the linear decoder on the same units); variant `noskip` turns it off
   classifier_from_backbone: true   # TCN -> Transformer -> pooling -> cross-region path feeds the logits; variant `linonly` turns it off
+  skip_windows: 4             # wide path features per unit: mean over the context, over the late delay, and over this many
+                              # equal windows of the context (time-resolved linear decoder); 0 = the two baseline features only
+  standardize_input: true     # backbone input: per-unit z-score of the sqrt-count with training-trial statistics
+  max_log_rate: 7.0           # clamp of the forecast log-rate inside the Poisson loss
   forecast_weight: 1.0        # weight of the Poisson forecasting loss
   persistence_late_bins: 20   # late-delay window (bins) whose mean rate seeds each neuron's own forecast
   class_weight: 1.0
@@ -110,6 +115,9 @@ train:
   weight_decay: 0.0001
   patience: 12
   select_by: "val_ce"           # checkpoint selection: val_ce (classification cross-entropy) | val_loss (multi-task) | val_bacc
+  forecast_norm: mean_count     # Poisson forecast loss per unit divided by its training mean count (gradient O(1) per unit,
+                                # whatever the count scale: single units or population channels) | none
+  forecast_norm_floor: 0.1      # smallest divisor (counts per target bin)
   eval_mode: "within_session"   # within_session | cross_session | cross_dataset
   split_scheme: "random"        # random (stratified) | blocked (contiguous test blocks + guard gap; drift-robust)
   val_frac: 0.15

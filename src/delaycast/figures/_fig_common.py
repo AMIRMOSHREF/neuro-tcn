@@ -67,13 +67,14 @@ ARM_COLORS: dict[str, str] = dict(MODE_COLORS)
 ARM_COLORS.setdefault("logreg_pca50_all_units", "#a7d8f2")
 ARM_COLORS.setdefault("logreg_l1_all_units", "#2f8fc7")
 ARM_COLORS.setdefault("logreg_trial_index", "#dddddd")
+ARM_COLORS.setdefault("logreg_selected_units_windows", "#004c80")
 ARM_COLORS.setdefault("logreg_selected_ALM", "#5a9fd4")
 ARM_COLORS.setdefault("logreg_selected_STR", "#7a6fb0")
 
 # Fixed arm order of Figure 4E (missing arms are skipped) and two-line tick labels.
 ARM_ORDER: tuple[str, ...] = ("criteria", "criteria_nospec", "criteria_popmean", "rate", "random",
                               "logreg_all_units", "logreg_pca50_all_units", "logreg_l1_all_units",
-                              "logreg_selected_units", "logreg_trial_index")
+                              "logreg_selected_units", "logreg_selected_units_windows", "logreg_trial_index")
 ARM_LABELS: dict[str, str] = {
     "criteria": "DelayCAST\ncriteria K",
     "criteria_nospec": "DelayCAST\nno spectral",
@@ -84,6 +85,7 @@ ARM_LABELS: dict[str, str] = {
     "logreg_pca50_all_units": "log-reg\nPCA-50",
     "logreg_l1_all_units": "log-reg\nL1 all units",
     "logreg_selected_units": "log-reg\nselected K",
+    "logreg_selected_units_windows": "log-reg\nselected K\nwindows",
     "logreg_selected_ALM": "log-reg\nselected ALM",
     "logreg_selected_STR": "log-reg\nselected STR",
     "logreg_trial_index": "log-reg\ntrial index",

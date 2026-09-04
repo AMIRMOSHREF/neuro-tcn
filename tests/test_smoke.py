@@ -127,7 +127,7 @@ def test_delaycast_default_config_contract():
     assert int(cfg.selection.min_criteria) == 2 and float(cfg.selection.min_stability) == 0.6
     assert int(cfg.selection.top_k_per_region) == 32 and float(cfg.selection.fdr_q) == 0.05
     assert set(cfg.selection.bands_hz) == {"slow", "theta", "beta"}
-    assert cfg.model.spectral_branch == "bands" and cfg.model.neuron_gate_penalty == "hoyer"
+    assert cfg.model.spectral_branch == "learned" and cfg.model.neuron_gate_penalty == "hoyer"
     assert int(cfg.data.bin_ms) == 10 and int(cfg.data.target_bin_ms) == 50
     assert int(cfg.data.context.delay_ms) // int(cfg.data.bin_ms) == 120
     assert int(cfg.data.target.response_ms) // int(cfg.data.target_bin_ms) == 30

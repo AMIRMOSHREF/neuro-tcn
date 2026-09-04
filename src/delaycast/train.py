@@ -178,7 +178,8 @@ def compute_loss(model: DelayCASTNet, batch: dict, cfg: Config, cw: torch.Tensor
     labels = batch["label"].to(device)
     out = model(x, batch["session"], pad_mask, neuron_mask=mask, drop_region=drop_region)
     ce = F.cross_entropy(out.logits, labels, weight=cw)
-    fc = sum(poisson_nll(out.forecast_log_rate[r], y[r], mask[r]) for r in REGIONS) / len(REGIONS)
+    fc = sum(poisson_nll(out.forecast_log_rate[r], y[r], mask[r], scale=model.forecast_scale(batch["session"], r),
+                         max_log_rate=model.max_log_rate) for r in REGIONS) / len(REGIONS)
     loss = float(cfg.model.class_weight) * ce + float(cfg.model.forecast_weight) * fc + model.gate_weight * out.gate_penalty
     return loss, {"ce": ce.item(), "poisson": fc.item(), "gate": out.gate_penalty.item()}, out
 
@@ -354,7 +355,7 @@ def build_model(cfg: Config, tensors: list[SessionTensors], device, splits: dict
         for t in tensors:
             idx = fit_trials(splits[t.session]) if t.session in splits else np.arange(t.n_trials)
             if len(idx):
-                model.fit_count_stats(t.session, {r: t.x[r][idx] for r in REGIONS})
+                model.fit_count_stats(t.session, {r: t.x[r][idx] for r in REGIONS}, {r: t.y[r][idx] for r in REGIONS})
     return model.to(device)
 
 

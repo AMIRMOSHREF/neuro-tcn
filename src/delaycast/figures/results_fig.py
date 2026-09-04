@@ -284,7 +284,7 @@ def _panel_arms(ax, results_by_run: dict[str, list[dict]], crit: list[dict]) -> 
     mean, p95 = _chance(crit)
     _chance_band(ax, p95, mean)
     ax.set_xticks(x)
-    ax.set_xticklabels([ARM_LABELS.get(a, a) for a in names], fontsize=6)
+    ax.set_xticklabels([ARM_LABELS.get(a, a) for a in names], fontsize=6 if len(names) <= 7 else 5.2)
     ax.set_xlim(-0.6, len(names) - 0.4)
     ax.set_ylim(0, 1.02)
     ax.set_ylabel("balanced accuracy")

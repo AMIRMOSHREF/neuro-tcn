@@ -516,16 +516,24 @@ def _p1(runs: dict) -> tuple[dict, dict]:
     metrics = ("balanced_accuracy_lr", "balanced_accuracy")
     a = compare_arms(crit, crit, metrics, "not_lower", "logreg_selected_units", "logreg_all_units",
                      baseline_a="logreg_selected_units", baseline_b="logreg_all_units", exclude=excl)
-    b = compare_arms(crit, crit, metrics, "not_lower", "criteria (DelayCAST)", "logreg_selected_units",
-                     baseline_b="logreg_selected_units", exclude=excl)
+    # P1b: the linear comparator is the time-resolved decoder on the same units (the features of the model's wide
+    # path) when the run has it, else the mean-rate decoder; the other one is reported next to it.
+    has_w = any(_baseline_row(r, "logreg_selected_units_windows") for r in (crit or []))
+    lin_name = "logreg_selected_units_windows" if has_w else "logreg_selected_units"
+    b = compare_arms(crit, crit, metrics, "not_lower", "criteria (DelayCAST)", lin_name, baseline_b=lin_name, exclude=excl)
+    b_other = (compare_arms(crit, crit, metrics, "not_lower", "criteria (DelayCAST)", "logreg_selected_units",
+                            baseline_b="logreg_selected_units", exclude=excl) if has_w else None)
     p1a = {"id": "P1a", "title": "Linear decoder on selected K not lower than linear on all units",
            "comparator": "baseline logreg_selected_units vs logreg_all_units (criteria run)",
            "statistic": f"paired {a.get('metric') or 'balanced_accuracy_lr'} difference, non-inferiority margin {NOT_LOWER_MARGIN}",
            "comparison": a, "verdict": a["verdict"], "failure_condition": a["failure_condition"], "result": _summary_line(a)}
     p1b = {"id": "P1b", "title": "DelayCAST on selected K not lower than linear on selected K",
-           "comparator": "run criteria vs baseline logreg_selected_units",
+           "comparator": f"run criteria vs baseline {lin_name}" + (" (time-resolved linear decoder: mean, late and window rates per unit)" if has_w else ""),
            "statistic": f"paired {b.get('metric') or 'balanced_accuracy_lr'} difference, non-inferiority margin {NOT_LOWER_MARGIN}",
            "comparison": b, "verdict": b["verdict"], "failure_condition": b["failure_condition"], "result": _summary_line(b)}
+    if b_other is not None:
+        p1b["comparison_mean_rate_decoder"] = b_other
+        p1b["result"] += f" || vs logreg_selected_units (mean-rate decoder): {_summary_line(b_other)}"
     # Within-pipeline ablations (reported, no verdict): the full classifier (backbone + linear count read-out) against
     # the linear read-out alone and against the backbone alone, trained with the same splits, selection and augmentation.
     abl = {}

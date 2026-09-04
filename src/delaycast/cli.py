@@ -110,6 +110,19 @@ def _npz_detail(recs) -> None:
     else:
         print("  regions:", {r: len(units) for r, (units, _) in by_region.items()})
         print("  spikes: ", {r: int(sum(len(u) for u in units)) for r, (units, _) in by_region.items()})
+        # Where the spikes lie relative to the epoch scalars: an export that stores trial-relative or millisecond
+        # spike times bins into silence unless the loader rescales it (it does, and says which reference it used).
+        from .data.rasters import read_epochs, resolve_spike_time_reference, spike_time_span
+        ep0 = read_epochs(data, rec.csv)
+        smin, smax, n_sp = spike_time_span(by_region)
+        print(f"  spike times: {smin:.3f} .. {smax:.3f} s ({n_sp} spikes); trial [{ep0['trial_start']:.3f}, {ep0['trial_stop']:.3f}], "
+              f"delay_start {ep0['delay_start_times']:.3f}, go_start {ep0['go_start_times']:.3f}")
+        try:
+            _, ref = resolve_spike_time_reference(by_region, ep0, (ep0["delay_start_times"] - 0.5, ep0["go_start_times"] + 1.5), rec.npz_path)
+            print(f"  spike time reference: {ref}" + ("" if ref == "absolute" else
+                  "  <- NOT absolute: the loader rescales the spikes onto the epoch time base (cache column spike_ref)"))
+        except ValueError as e:
+            print(f"  spike time reference: UNKNOWN - {e}")
     if "brain_region" in data.files:
         unknown = [r for r in np.asarray(data["brain_region"]).astype(str).ravel() if normalize_region(r) is None]
         if unknown:

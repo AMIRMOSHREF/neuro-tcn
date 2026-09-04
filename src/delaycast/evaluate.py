@@ -253,8 +253,10 @@ def _deviance_terms(model, fc_log_rate, y, mask, null_mu, x, exclude_neuron: int
 
 
 # ----------------------------------------------------------------------------- linear baselines
-def _unit_features(cache, cfg, region_filter=None, unit_index: dict | None = None) -> np.ndarray:
-    """Delay mean + late-delay mean rate per unit (2 features per unit); optionally a subset of units."""
+def _unit_features(cache, cfg, region_filter=None, unit_index: dict | None = None, n_windows: int = 0) -> np.ndarray:
+    """Delay mean + late-delay mean rate per unit (2 features per unit), plus the mean rate in ``n_windows`` equal
+    windows of the context when asked (the time-resolved linear decoder, the same features as the model's wide
+    path); optionally a subset of units."""
     late_bins = max(1, int(round(float(cfg.selection.late_delay_ms) / float(cache.bin_ms))))
     feats = []
     for r in REGIONS:
@@ -269,6 +271,10 @@ def _unit_features(cache, cfg, region_filter=None, unit_index: dict | None = Non
             continue
         feats.append(X.mean(axis=2))
         feats.append(X[:, :, -late_bins:].mean(axis=2))
+        if n_windows:
+            edges = np.round(np.linspace(0, X.shape[2], n_windows + 1)).astype(int)
+            for a, b in zip(edges[:-1], edges[1:]):
+                feats.append(X[:, :, a:max(b, a + 1)].mean(axis=2))
     return np.concatenate(feats, axis=1).astype(np.float32) if feats else np.zeros((cache.n_trials, 0), np.float32)
 
 
@@ -308,7 +314,8 @@ def linear_baselines(tensors, splits, caches, cfg, unit_index: dict, rng: np.ran
     sweep_y: dict[int, list] = {ms: [] for ms in sweep_ms}
     extras = {"l1_overlap": [], "tuned_C": {}}
     specs = [("logreg_all_units", None, None, "cv"), ("logreg_pca50_all_units", None, None, "pca"), ("logreg_l1_all_units", None, None, "l1"),
-             ("logreg_selected_units", "sel", None, "cv"), ("logreg_selected_ALM", "sel", ("ALM",), "cv"),
+             ("logreg_selected_units", "sel", None, "cv"), ("logreg_selected_units_windows", "selw", None, "cv"),
+             ("logreg_selected_ALM", "sel", ("ALM",), "cv"),
              ("logreg_selected_STR", "sel", ("STR",), "cv"), ("logreg_trial_index", "drift", None, "plain")]
     for t in tensors:
         sp = splits[t.session]
@@ -320,13 +327,16 @@ def linear_baselines(tensors, splits, caches, cfg, unit_index: dict, rng: np.ran
         y = t.labels
         feats_all = _unit_features(cache, cfg)
         feats_sel = _unit_features(cache, cfg, unit_index=unit_index[t.session])
+        feats_selw = _unit_features(cache, cfg, unit_index=unit_index[t.session], n_windows=max(0, int(cfg.model.get_path("skip_windows", 4))))
         trial_index = ((np.arange(cache.n_trials) / max(cache.n_trials - 1, 1))[:, None]).astype(np.float32)
         best_c = None
         for name, source, area, kind in specs:
             if source is None:
                 feats = feats_all
             elif source == "sel":
-                feats = _unit_features(cache, cfg, region_filter=area, unit_index=unit_index[t.session])
+                feats = feats_sel if area is None else _unit_features(cache, cfg, region_filter=area, unit_index=unit_index[t.session])
+            elif source == "selw":
+                feats = feats_selw
             else:
                 feats = trial_index
             if feats.shape[1] == 0:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -135,7 +136,7 @@ def _csv_flags(rec: TrialRecord, cfg) -> tuple[bool, str]:
     return True, ""
 
 
-LOADER_VERSION = 3
+LOADER_VERSION = 4
 """Bumped on EVERY change of the trial loader / QC rules: it is part of the cache key, so an old cache can never be
 read by a newer loader (v2: unit alignment by ID, log lick times, miss trials kept; v3: empty NPZ lick arrays defer to
 the log, sessions without unit identity excluded)."""
@@ -341,10 +342,24 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
             meta.append({"trial": rec.trial, "label": rec.label, "npz_path": str(rec.npz_path),
                          "video_path": str(rec.video_path) if rec.video_path else "",
                          "first_lick_s": _first_lick(tr), "lick_source": tr.qc.get("lick_source", ""),
+                         "spike_ref": tr.qc.get("spike_time_reference", ""),
                          "csv_outcome": str(rec.csv.get("outcome", "")) if rec.csv else "",
                          "csv_instruction": str(rec.csv.get("trial_instruction", "")) if rec.csv else "",
                          **({f"pooled_{r}": v for r, v in tr.qc.get("n_units_pooled", {}).items()} if pop else {}),
                          **{f"ep_{k}": v for k, v in tr.epochs.items()}})
+        n_ctx_spikes = int(sum(int(ctx[r][:n_kept].astype(np.int64).sum()) for r in REGIONS if ctx[r] is not None)) if n_kept else 0
+        if n_kept and n_ctx_spikes == 0:
+            # Every kept trial is empty in the delay window: the spikes were on a time base the loader could not
+            # resolve, or the files hold no spikes.  Training on silence would be meaningless.
+            refs = dict(Counter(m.get("spike_ref", "") for m in meta))
+            log.error("session %s EXCLUDED: no spike in the context window of any of its %d kept trials (spike time "
+                      "references seen: %s) - see `inspect --npz-detail` (spike range vs epochs)", sess, n_kept, refs)
+            excluded_rows.append({"session": sess, "n_discovered": len(recs), "n_unit_count_mismatch": 0,
+                                  "reason": "no_spikes_in_window",
+                                  "fix": "the spike times of the trial files are not on the time base of the epoch scalars "
+                                         "(absolute seconds); `inspect --npz-detail` prints the spike range and the epochs",
+                                  "alignment_note": f"spike time references: {refs}"})
+            continue
         n_mismatch = drop_reasons.get("unit_count_mismatch", 0)
         if unit_index is None and not pop and len(recs) >= 10 and n_mismatch > MAX_POSITIONAL_MISMATCH_FRAC * len(recs):
             log.error("session %s EXCLUDED: unit count differs from the first trial's in %d of %d trials and %s",
@@ -374,6 +389,7 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
                      "n_dropped": len(recs) - n_kept, "drop_reasons": drop_reasons,
                      "delay_ms": delay_ms, "max_delay_dev_ms": max_dev_ms, **align_info,
                      "representation": "population" if pop else "units",
+                     "spike_time_references": dict(Counter(m.get("spike_ref", "") for m in meta)),
                      "units_pooled": ({r: int(np.median([m.get(f"pooled_{r}", 0) for m in meta])) for r in REGIONS} if pop else None),
                      "lick_sources": lick_sources, "lick_labels": lick_labels},
         )
@@ -563,6 +579,8 @@ def cache_summary(caches: list[SessionCache]) -> pd.DataFrame:
         row["align"] = str(qi.get("unit_alignment", "?"))
         if qi.get("units_pooled"):
             row["align"] += " (" + "/".join(str(v) for v in qi["units_pooled"].values()) + " units pooled)"
+        refs = qi.get("spike_time_references", {}) or {}
+        row["spike_ref"] = "/".join(f"{k}:{v}" for k, v in refs.items()) or "?"
         srcs = qi.get("lick_sources", {}) or {}
         row["licks"] = "/".join(f"{k}:{v}" for k, v in srcs.items()) or "?"
         labs = qi.get("lick_labels", {}) or {}

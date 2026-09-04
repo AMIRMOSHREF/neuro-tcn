@@ -87,6 +87,18 @@ python -m delaycast cache --set data.data_b_root=C:/PythonProject/Rodent/Data2_u
 `configs/delaycast.yaml` to the new folder afterwards.) Until then the **unit-level** corpus is the four `Data`
 sessions, and `cross_dataset` transfer is skipped with a warning.
 
+### `Data2` spike times are not on the epoch time base
+
+The first population run showed every `Data2` session with **0 units pooled** and 0.0 channel agreement with its `Data`
+twin: the `Data2` trial files store spike times on another time base than their epoch scalars (which are absolute
+session seconds, as in `Data`), so binned against absolute windows they were silent. The loader now resolves the
+reference per trial — absolute seconds, seconds relative to `start_time`, or milliseconds — from where the spikes lie
+relative to the trial bounds, rescales, and records it (`inspect --npz-detail` prints the spike range, the epochs and
+the detected reference; the `cache` table has a `spike_ref` column). A session whose kept trials hold no spike in the
+delay window is excluded (`no_spikes_in_window`) instead of being trained on. After `git pull`, rerun
+`.\scripts\run_delaycast.ps1 -Population`: the twin check must read 1.0 and the `Data2` sessions must show a few
+hundred units pooled per region.
+
 ### Data + Data2 without unit identity: the population representation
 
 What the `Data2` export does preserve is every trial's **population**: the spike counts of the units that fired,
@@ -181,23 +193,31 @@ The synthetic tree mirrors both layouts and NPZ schemas; example figures made fr
 
 ## What the model is, how accurate it is, and how to make it more accurate
 
-**Model** (`src/delaycast/models/delaycast_net.py`, ≈ 0.4 M parameters): per session, the K ≤ 32 selected units of
-each region enter through a neuron gate and a normalised read-in; a dilated causal TCN (5 blocks, kernel 3, receptive
-field 125 bins = the whole 1.2 s delay) and two causal Transformer blocks with a fixed time-to-go encoding produce
-per-bin features; attention pooling over time and cross-region attention give one fused token; the class logits are
-the sum of the head on that token (deep path) and a session-specific linear read-out of every unit's mean counts
-(wide path, so the model contains the linear decoder); a Poisson decoder forecasts each unit's response-epoch counts
-from the same token plus a persistence path; a causal Gabor filterbank of the gated population rate is the
-spectro-temporal branch.
+**Model** (`src/delaycast/models/delaycast_net.py`, ≈ 0.5 M parameters): per session, the K ≤ 32 selected units of
+each region enter through a neuron gate and a normalised read-in as per-unit standardised sqrt-counts (training
+statistics, so every unit is on the same scale); a dilated causal TCN (5 blocks, kernel 3, receptive field 125 bins =
+the whole 1.2 s delay) and two causal Transformer blocks with a fixed time-to-go encoding produce per-bin features;
+attention pooling over time and cross-region attention give one fused token; the class logits are the sum of the head
+on that token (deep path) and a session-specific linear read-out of every unit's mean counts over the context, the late
+delay and four 300 ms windows (wide path: a time-resolved linear decoder, so the model contains the tuned linear
+decoder as a special case); a Poisson decoder forecasts each unit's response-epoch counts from the same token plus a
+persistence path, with the loss of every unit scaled by its mean count so that the forecast term has the same weight
+for sparse single units and for population channels; a **learned causal filterbank** of the gated population rate
+(Gabor-initialised quadrature pairs, free parameters) is the spectro-temporal branch.
 
 **Where the spectral and Transformer parts are.** Wavelet analysis (`selection.wavelet`, complex Morlet CWT band power
-over the delay, criterion **W**) is part of the neuron selection and of Figure 2; the in-model counterpart is the causal
-Gabor filterbank on the gated population rate (`model.spectral_branch: bands`, an STFT with a causal Hann window per
-band), whose control is the same filterbank collapsed to the population mean (`popmean`, prediction P7); the two causal
-Transformer blocks (`model.n_transformer_layers: 2`, `model.n_heads`) sit after the TCN and are what the attention
-centre-of-mass and the temporal occlusion of Figure 3 are computed from (the attention map is the last block's; the
-stack has at least one block). All of them are on by default; the `nospec` / `popmean` variants ablate the spectral
-branch, and `model.n_transformer_layers` sets the depth of the Transformer stack.
+over the delay, criterion **W**) is part of the neuron selection and of Figure 2. The in-model counterpart was a fixed
+causal Gabor filterbank on the gated population rate (an STFT with a causal Hann window per band); on the four `Data`
+sessions it added nothing over its population-mean control (P7: −0.013), so it is now the **initialisation** of a
+learned causal filterbank (`model.spectral_branch: learned`): the same quadrature pairs are free parameters, the branch
+can move its centre frequencies, bandwidths and shapes to whatever spectro-temporal feature of the population rate
+predicts the action, and it stays causal by construction. Its control is the same window collapsed to the population
+mean (`popmean`, prediction P7); `bands` keeps the fixed STFT and `nospec` removes the branch. If the learned bank also
+fails P7, that is the finding: the spectral content of the population rate beyond its mean carries no information
+about the upcoming lick that the units' rates do not already carry. The two causal Transformer blocks
+(`model.n_transformer_layers: 2`, `model.n_heads`) sit after the TCN and are what the attention centre-of-mass and the
+temporal occlusion of Figure 3 are computed from (the attention map is the last block's; the stack has at least one
+block).
 
 **Accuracy on the four `Data` sessions** (3 seeds, test trials never used for selection or training; chance ≈ 0.62):
 Left/Right balanced accuracy 0.968 / 0.956 / 0.878 on Sessions 2–4 with ≈ 90–104 selected units out of ≈ 2,000
@@ -229,7 +249,12 @@ The first report on the four `Data` sessions changed four rules; every one is do
   oracle are reported next to it;
 * **wide-and-deep classifier** (`model.linear_skip`): a gated, standardised mean-count read-out is added to the
   backbone logits, checkpoints are chosen by validation cross-entropy (`train.select_by: val_ce`) and the gate penalty
-  is 0.1; the ablations `linonly` / `noskip` are part of the protocol.
+  is 0.1; the ablations `linonly` / `noskip` are part of the protocol;
+* **after the population run** (`-Population`, 11 sessions): the wide path is time-resolved (`model.skip_windows: 4`,
+  and `logreg_selected_units_windows` is the matching linear baseline), the backbone input is standardised per unit
+  (`model.standardize_input`), the forecast loss is scaled per unit by its mean count (`train.forecast_norm`) so that
+  population channels with tens of spikes per bin do not swamp the classification loss, and the fixed Gabor bank is
+  replaced by the learned filterbank (`model.spectral_branch: learned`).
 
 The report also excludes sessions with an empty criteria set from criteria-arm comparisons (listed in its header,
 with K<sub>eff</sub> per session), prints, per comparison, in how many sessions the prediction replicates on the

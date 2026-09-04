@@ -288,6 +288,72 @@ def bin_units(spike_list: list[np.ndarray], start: float, n_bins: int, bin_s: fl
     return np.minimum(counts, 255).astype(np.uint8).reshape(n_units, n_bins)
 
 
+SPIKE_TIME_REFERENCES = ("absolute", "trial_start", "milliseconds", "none")
+
+
+def spike_time_span(region_data: dict) -> tuple[float, float, int]:
+    """(min, max, n) over every spike of every region (NaN, NaN, 0 without spikes)."""
+    mins, maxs, n = [], [], 0
+    for spikes, _ in region_data.values():
+        for u in spikes:
+            a = np.asarray(u, dtype=float).ravel()
+            a = a[np.isfinite(a)]
+            if a.size:
+                mins.append(a.min()); maxs.append(a.max()); n += int(a.size)
+    return (float(min(mins)), float(max(maxs)), n) if n else (float("nan"), float("nan"), 0)
+
+
+def resolve_spike_time_reference(region_data: dict, ep: dict, window: tuple[float, float], npz_path="") -> tuple[dict, str]:
+    """Put the spike times of one trial on the time base of the epoch scalars.
+
+    The epoch scalars (``delay_start``, ``go_start`` ...) are absolute session times in both datasets, but an export
+    may store the spikes of a trial **relative to the trial start** (NWB-style trial alignment) or in
+    **milliseconds**; binned against absolute windows such spikes fall outside every bin and the trial is silently
+    empty (this is how every ``Data2`` session came out with zero pooled units).  The reference is decided per trial
+    from where the spikes lie:
+
+    * ``absolute``: at least half of the spikes fall inside the trial ``[trial_start - 1 s, trial_stop + 1 s]``
+      (or, without trial bounds, inside the binning window widened by 2 s);
+    * ``trial_start``: spikes lie in ``[-1 s, trial_stop - trial_start + 1 s]`` while the trial starts later than
+      that -> shifted by ``trial_start``;
+    * ``milliseconds``: spikes divided by 1000 satisfy the absolute rule -> rescaled;
+    * ``none``: the trial has no spikes at all (nothing to decide).
+
+    Anything else raises ``ValueError`` (the trial is dropped with reason ``load_error`` and the numbers are in the
+    message) rather than being binned into silence.
+    """
+    smin, smax, n = spike_time_span(region_data)
+    if n == 0:
+        return region_data, "none"
+    t0, t1 = float(ep.get("trial_start", np.nan)), float(ep.get("trial_stop", np.nan))
+    if np.isfinite(t0) and np.isfinite(t1) and t1 > t0:
+        lo, hi = t0 - 1.0, t1 + 1.0
+    else:
+        lo, hi = window[0] - 2.0, window[1] + 2.0
+        t0 = np.nan
+
+    def frac_inside(scale: float) -> float:
+        inside = tot = 0
+        for spikes, _ in region_data.values():
+            for u in spikes:
+                a = np.asarray(u, dtype=float).ravel() * scale
+                tot += a.size
+                inside += int(((a >= lo) & (a <= hi)).sum())
+        return inside / max(tot, 1)
+
+    if frac_inside(1.0) >= 0.5:
+        return region_data, "absolute"
+    if np.isfinite(t0) and smin >= -1.0 and smax <= (t1 - t0) + 1.0 and t0 > smax:
+        shifted = {r: ([np.asarray(u, dtype=float) + t0 for u in spikes], ids) for r, (spikes, ids) in region_data.items()}
+        return shifted, "trial_start"
+    if frac_inside(1e-3) >= 0.5:
+        scaled = {r: ([np.asarray(u, dtype=float) * 1e-3 for u in spikes], ids) for r, (spikes, ids) in region_data.items()}
+        return scaled, "milliseconds"
+    raise ValueError(f"{npz_path}: spike times {smin:.3f}..{smax:.3f} ({n} spikes) are on an unknown time base: trial "
+                     f"[{t0:.3f}, {t1:.3f}], binning window [{window[0]:.3f}, {window[1]:.3f}] - neither absolute, nor relative "
+                     "to trial_start, nor milliseconds")
+
+
 _SPLIT_KEYS = {
     "ALM_L": "left_ALM_spikes",
     "ALM_R": "right_ALM_spikes",
@@ -392,6 +458,7 @@ def load_trial_rasters(npz_path, cfg, metadata: dict | None = None,
         else 0
     )
     region_data = spikes_by_region(data)
+    region_data, spike_ref = resolve_spike_time_reference(region_data, ep, (ctx_start, tgt_stop), npz_path)
     context, target, uids = {}, {}, {}
     n_absent, n_extra = {}, {}
     for r in REGIONS:
@@ -438,6 +505,7 @@ def load_trial_rasters(npz_path, cfg, metadata: dict | None = None,
         "licked_left": bool(np.any(lick_left >= go_start)),
         "licked_right": bool(np.any(lick_right >= go_start)),
         "lick_source": lick_source,
+        "spike_time_reference": spike_ref,
         "delay_len_s": float(go_start - delay_start),
         "n_units_absent": n_absent,
         "n_units_extra": n_extra,

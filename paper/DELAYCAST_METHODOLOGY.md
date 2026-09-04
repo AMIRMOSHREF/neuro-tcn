@@ -63,6 +63,13 @@ the upcoming action** — and whether that answer is the same across recordings.
   the `linonly` / `noskip` ablations are skipped as they would train on identical inputs) and the report marks P1a,
   P1b, P2, P4 and P6 as not applicable, while P0, P3, P5a/b, P7 and P8 are tested on the full corpus (`Data` +
   `Data2`, 11 sessions). Cache key suffix `_pop8`; the cache JSON keeps, per trial, how many units were pooled.
+* **Spike time base**: the epoch scalars are absolute session seconds in both datasets, but the `Data2` trial files
+  store their spikes on another base (binned against absolute windows they were silent: 0 units pooled, 0.0 channel
+  agreement with the `Data` twins). The loader decides the reference per trial from where the spikes lie relative to
+  the trial bounds — absolute, relative to `start_time`, or milliseconds — rescales, and records it
+  (`spike_time_reference` in the QC log and the `spike_ref` column of the cache table); an unresolvable base drops the
+  trial with the numbers in the reason, and a session with no spike in the delay window of any kept trial is excluded
+  (`no_spikes_in_window`).
 * **NPZ-level QC** (both datasets): licks before the go cue → drop; folder label contradicted by the lick record
   (NPZ arrays, else log row) or licks on both sides → drop; a trial with **no lick record anywhere** keeps its folder
   label (it cannot be verified, `lick_source = none` in the metadata); delay length deviating from 1.2 s by more than
@@ -130,7 +137,7 @@ session are never touched by selection, adapter fitting or any statistic, so tra
 ```
 selected neurons (K × T) ─► NeuronGate (session) ─► normalised read-in (session) ─┐
                     │                                                              ├─► dilated causal TCN (RF 125 bins)
-                    └─► gated population rate ─► causal Gabor filterbank (band power) ┘   per-time-step channel norm
+                    └─► gated population rate ─► learned causal filterbank (band power) ┘   per-time-step channel norm
                                                                                       ─► N causal Transformer blocks
                                                                                          (+ fixed time-to-go encoding)
                                                                                       ─► attention pooling (which past bins?)
@@ -144,12 +151,18 @@ Design choices that make the method testable:
 
 1. **Strictly causal within the delay.** Dilated convolutions use left padding only, normalisation is per time step
    (a `GroupNorm` over time would let bin *t* see the future), attention is causally masked, and the spectral branch
-   is a fixed *causal* Gabor filterbank applied inside the model. The representation at bin *t* depends on bins ≤ *t*
-   only (`tests/test_causality.py`), which is what makes the context sweep and the occlusion maps interpretable.
-2. **Spectro-temporal branch on the gated population.** Band power (slow / theta / beta, 300 ms causal windows) of the
-   *gated* population rate is appended to the read-in; it is recomputed under any mask or occlusion and cannot bypass
-   the neuron gates. A matched **population-mean control** (`spectral_branch: popmean`) has the same window and gating
-   but no spectral information; `none` removes the branch.
+   is a *causal* filterbank (left padding only) applied inside the model. The representation at bin *t* depends on
+   bins ≤ *t* only (`tests/test_causality.py`), which is what makes the context sweep and the occlusion maps
+   interpretable.
+2. **Spectro-temporal branch on the gated population.** A causal filterbank (300 ms windows) of the *gated*
+   population rate gives band-power channels that are appended to the read-in; it is recomputed under any mask or
+   occlusion and cannot bypass the neuron gates. The bank is **learned** (`spectral_branch: learned`): its quadrature
+   kernels are initialised at the fixed Gabor pairs of the slow / theta / beta bands (a causal STFT) and are free
+   parameters afterwards, so the branch can move to whatever spectro-temporal feature of the population rate predicts
+   the action — the fixed bank (`bands`) added nothing over its control on the four `Data` sessions (P7: −0.013). A
+   matched **population-mean control** (`spectral_branch: popmean`) has the same window and gating but no spectral
+   information; `none` removes the branch. If the learned bank fails P7 as well, the conclusion is that the spectral
+   content of the population rate carries no information about the upcoming lick beyond the units' rates.
 3. **Identifiable neuron gates.** Read-in columns are L2-normalised, there is no free scale, and sparsity is enforced
    with the scale-invariant Hoyer penalty — so gate *ranks* are a model-based importance that can be compared with the
    model-free criteria. (The persistence path is an explicit ungated self-term.)
@@ -159,18 +172,29 @@ Design choices that make the method testable:
    test-time context sweep, window occlusion and region drop are patterns the network has seen.
 6. **Wide-and-deep classifier.** The class logits are the sum of two paths: the *deep* path (TCN → Transformer →
    attention pooling → cross-region attention → linear head) and a *wide* path — a session-specific linear read-out
-   of each selected unit's mean √count over the visible context and over its last 200 ms (the two features of the
-   linear baseline), standardised on the training trials and multiplied by the same neuron gates. The network
-   therefore contains the tuned linear decoder on the same units as a special case and the deep path only has to
-   add what a linear read-out of mean rates cannot express. The ablations `linonly` (wide path alone) and `noskip`
-   (deep path alone) are trained in the same pipeline and reported next to P1b. Added after the first real-data run,
-   in which the deep path alone was 0.8 points below logistic regression on the same units.
-7. **Multi-task objective** `CE(class) + λ · PoissonNLL(response counts) + μ · Hoyer(gates)` with a persistence path
+   of each selected unit's mean √count over the visible context, over its last 200 ms (the two features of the
+   mean-rate linear baseline) and over `model.skip_windows` (4) equal windows of the context — a time-resolved
+   linear decoder in which *when* in the delay a unit carries the side is a learned weight — standardised on the
+   training trials, multiplied by the same neuron gates, and with any window that holds no visible bin zeroed after
+   standardisation (context sweep, occlusion). The network therefore contains the tuned time-resolved linear
+   decoder on the same units as a special case and the deep path only has to add what a linear read-out of
+   windowed rates cannot express; `logreg_selected_units_windows` is the matching external baseline of P1b. The
+   ablations `linonly` (wide path alone) and `noskip` (deep path alone) are trained in the same pipeline and
+   reported next to P1b. Added after the first real-data run, in which the deep path alone was 0.8 points below
+   logistic regression on the same units.
+7. **Standardised read-in.** The backbone input of every unit is the z-score of its √count with the mean and SD of
+   the training trials (`model.standardize_input`), so units — or population channels with tens of spikes per bin —
+   enter on the same scale; the gates and the spectral population trace act on the raw gated √counts.
+8. **Multi-task objective** `CE(class) + λ · PoissonNLL(response counts) + μ · Hoyer(gates)` with a persistence path
    (each neuron's late-delay log-rate seeds its own forecast) so the decoder learns deviations from persistence.
-   The checkpoint is the epoch with the lowest class-weighted validation cross-entropy (`train.select_by: val_ce`);
-   the multi-task loss is dominated by the Poisson term late in training and can select a checkpoint that trades
-   accuracy for forecast likelihood. μ = 0.1 (0.5 pushed the gates of the already sparse selected set to ≈ 0.68).
-7. **Session adapters + shared backbone**: read-in, gates and read-out are session-specific; TCN, Transformer,
+   Each unit's Poisson term is divided by its training mean count (`train.forecast_norm: mean_count`, floor 0.1), so
+   the gradient of the forecast term is O(1) per unit whatever the count scale — without it the population channels
+   (≈ 30 spikes per bin) made the forecast term 10× the classification term and the loss unstable; the forecast
+   log-rate is clamped at 7 inside the loss. The checkpoint is the epoch with the lowest class-weighted validation
+   cross-entropy (`train.select_by: val_ce`); the multi-task loss is dominated by the Poisson term late in training
+   and can select a checkpoint that trades accuracy for forecast likelihood. μ = 0.1 (0.5 pushed the gates of the
+   already sparse selected set to ≈ 0.68).
+9. **Session adapters + shared backbone**: read-in, gates and read-out are session-specific; TCN, Transformer,
    attention and heads are shared across all sessions of both datasets — joint training on `Data` and `Data2`, and
    adapter-only transfer to held-out sessions / datasets.
 

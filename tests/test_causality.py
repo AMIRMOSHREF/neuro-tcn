@@ -149,7 +149,7 @@ def test_prefix_pad_mask_hides_masked_bins(model, x, t0):
 
 
 # ----------------------------------------------------------------------------- (c) causal band power
-@pytest.mark.parametrize("mode", ["bands", "popmean"])
+@pytest.mark.parametrize("mode", ["bands", "learned", "popmean"])
 @pytest.mark.parametrize("t", [5, 60, 119])
 def test_causal_band_power(cfg, mode, t):
     """Perturbing bin t leaves the filterbank output at bins < t unchanged, in both the spectral and the
@@ -179,7 +179,7 @@ def test_causal_band_power_masked_prefix_is_ignored(cfg):
     pop = torch.rand(B, T_CTX) * 2
     valid = torch.ones(B, T_CTX)
     valid[:, :40] = 0.0
-    for mode in ("bands", "popmean"):
+    for mode in ("bands", "learned", "popmean"):
         bp = CausalBandPower(float(cfg.data.bin_ms), bands, float(cfg.model.spectral_win_ms), mode=mode).eval()
         ref = bp(pop, valid)
         pop2 = pop.clone()
@@ -314,9 +314,22 @@ def test_linear_count_readout_paths(cfg, x):
     assert m.linear_skip and m.classifier_from_backbone
     m.fit_count_stats(SESSION, {r: x[r].numpy() for r in REGIONS})
     ad = m.adapters[SESSION.replace("/", "__")]
-    f = m.count_features(x["ALM_L"], torch.ones(B, T_CTX), m.late_bins)
+    f, fv = m.count_features(x["ALM_L"], torch.ones(B, T_CTX), m.late_bins, m.n_windows)
+    nf = m.n_feat * K
+    assert f.shape == (B, nf) and fv.shape == (B, nf) and float(fv.min()) == 1.0 and m.n_feat == 2 + m.n_windows
     z = (f - ad.skip["ALM_L"].mu) / ad.skip["ALM_L"].sd
-    assert torch.allclose(z.mean(0), torch.zeros(2 * K), atol=1e-4) and torch.allclose(z.std(0, unbiased=False), torch.ones(2 * K), atol=1e-3)
+    assert torch.allclose(z.mean(0), torch.zeros(nf), atol=1e-4) and torch.allclose(z.std(0, unbiased=False), torch.ones(nf), atol=1e-3)
+    # the window features tile the context: their bin-count-weighted mean equals the whole-context feature
+    if m.n_windows:
+        edges = torch.linspace(0, T_CTX, m.n_windows + 1).round().long().tolist()
+        w = torch.tensor([float(b - a) for a, b in zip(edges[:-1], edges[1:])])
+        win = f[:, 2 * K:].reshape(B, m.n_windows, K)
+        assert torch.allclose((win * w[None, :, None]).sum(1) / w.sum(), f[:, :K], atol=1e-5)
+        # an invisible window is flagged invalid (and therefore contributes nothing after standardisation)
+        valid = torch.ones(B, T_CTX)
+        valid[:, : edges[1]] = 0.0
+        _, fv2 = m.count_features(x["ALM_L"], valid, m.late_bins, m.n_windows)
+        assert float(fv2[:, 2 * K: 3 * K].max()) == 0.0 and float(fv2[:, 3 * K:].min()) == 1.0
     with torch.no_grad():
         # zero-initialised read-out: at init the logits are the backbone's
         out = m(x, SESSION)
@@ -354,3 +367,65 @@ def test_linear_count_readout_paths(cfg, x):
     c3 = load_config(None); c3.set_path("model.linear_skip", False); c3.set_path("model.classifier_from_backbone", False)
     with pytest.raises(ValueError):
         DelayCASTNet([SESSION], K, T_CTX, T_TGT, c3)
+
+
+
+def test_learned_filterbank_starts_at_the_gabor_bank_and_is_trainable(cfg):
+    """``learned`` mode initialises at the fixed Gabor kernels (same output at init) and exposes them as parameters."""
+    bands = {k: list(v) for k, v in cfg.selection.bands_hz.items()}
+    fixed = CausalBandPower(float(cfg.data.bin_ms), bands, float(cfg.model.spectral_win_ms), mode="bands").eval()
+    learned = CausalBandPower(float(cfg.data.bin_ms), bands, float(cfg.model.spectral_win_ms), mode="learned").eval()
+    torch.manual_seed(3)
+    pop, valid = torch.rand(B, T_CTX) * 2, torch.ones(B, T_CTX)
+    assert torch.allclose(fixed(pop, valid), learned(pop, valid), atol=ATOL)
+    assert sum(p.numel() for p in fixed.parameters()) == 0
+    assert sum(p.numel() for p in learned.parameters()) == 2 * len(bands) * learned.nper
+    learned(pop, valid).sum().backward()
+    assert learned.kernel.grad is not None and float(learned.kernel.grad.abs().max()) > 0
+
+
+def test_forecast_loss_scale_is_count_invariant(cfg):
+    """With the per-unit mean-count normalisation the gradient of the Poisson term w.r.t. the log-rate is O(1)
+    whatever the count scale (single units vs population channels); without it the gradient grows with the rate."""
+    from delaycast.models.delaycast_net import poisson_nll
+    torch.manual_seed(0)
+    n_el = B * K * T_TGT                       # the loss is a mean over elements: per-element gradient x n_el
+    g_norms = []
+    for mean in (0.2, 5.0, 60.0):
+        counts = torch.poisson(torch.full((B, K, T_TGT), mean))
+        lr = torch.full((B, K, T_TGT), float(np.log(mean)) + 0.3, requires_grad=True)
+        scale = torch.full((K,), mean)
+        poisson_nll(lr, counts, None, scale=scale).backward()
+        g_norm = float(lr.grad.abs().mean()) * n_el
+        lr2 = lr.detach().clone().requires_grad_(True)
+        poisson_nll(lr2, counts, None).backward()
+        g_raw = float(lr2.grad.abs().mean()) * n_el
+        assert 0.05 < g_norm < 3.0, (mean, g_norm)
+        assert abs(g_raw / g_norm - mean) < 1e-4 * mean + 1e-6
+        g_norms.append((g_norm, g_raw))
+    # normalised: within one order of magnitude across a 300-fold range of count scales (a Poisson of mean 0.2 has a
+    # large relative error by nature); raw: the gradient grows with the count scale
+    assert max(g for g, _ in g_norms) / min(g for g, _ in g_norms) < 8.0, g_norms
+    assert max(g for _, g in g_norms) / min(g for _, g in g_norms) > 20.0, g_norms
+    # the log-rate clamp keeps a runaway prediction finite
+    big = torch.full((B, K, T_TGT), 50.0)
+    assert torch.isfinite(poisson_nll(big, torch.zeros(B, K, T_TGT)))
+
+
+def test_standardised_input_uses_training_statistics(cfg, x):
+    """The backbone input is the per-unit z-score of the sqrt-count with the statistics fitted on the given trials;
+    the wide path and the spectral population trace are unaffected by that choice (the population trace stays
+    non-negative, which the log1p of the branch requires)."""
+    torch.manual_seed(0)
+    m = DelayCASTNet([SESSION], K, T_CTX, T_TGT, cfg).eval()
+    assert m.standardize_input
+    m.fit_count_stats(SESSION, {r: x[r].numpy() for r in REGIONS}, {r: torch.poisson(torch.full((B, K, T_TGT), 2.0)).numpy() for r in REGIONS})
+    st = m.adapters[SESSION.replace("/", "__")].stats["ALM_L"]
+    sq = torch.sqrt(x["ALM_L"])
+    assert torch.allclose(st.mu, sq.mean((0, 2)), atol=1e-5) and torch.allclose(st.sd, sq.std((0, 2), unbiased=False), atol=1e-5)
+    assert torch.allclose(st.rate, torch.full((K,), 2.0), atol=0.5)
+    with torch.no_grad():
+        out = m(x, SESSION)
+        assert torch.isfinite(out.logits).all() and all(torch.isfinite(out.spec[r]).all() for r in REGIONS)
+    m2 = DelayCASTNet([SESSION], K, T_CTX, T_TGT, load_config(None, ["model.d_model=32", "model.standardize_input=false"])).eval()
+    assert not m2.standardize_input

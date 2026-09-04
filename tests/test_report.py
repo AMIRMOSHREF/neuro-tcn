@@ -57,6 +57,7 @@ def make_results(bacc: list[float], mode: str, *, chance_p95: float = 0.42, nega
     res["baselines"] = [
         {"model": "logreg_all_units", **_cls(0.9), "per_session": _per_session(lin_all)},
         {"model": "logreg_selected_units", **_cls(0.9), "per_session": _per_session(lin_sel)},
+        {"model": "logreg_selected_units_windows", **_cls(0.9), "per_session": _per_session(lin_sel)},
         {"model": "logreg_trial_index", **_cls(0.35), "per_session": _per_session([0.35] * 6)},
     ]
     # DelayCAST Left/Right accuracy matches the linear decoder on the same units -> P1b non-inferior
@@ -168,6 +169,9 @@ def test_report_supported_scenario(cfg, tmp_path):
     out = build_out_dir(tmp_path, RATE_LOW)
     md, rep, text = _run_report(cfg, out)
     assert md == out / "REPORT.md" and md.is_file() and (out / "report.json").is_file()
+    # P1b compares with the time-resolved linear decoder when the run has it, and reports the mean-rate one too
+    assert "logreg_selected_units_windows" in rep["predictions"]["P1b"]["comparator"]
+    assert "comparison_mean_rate_decoder" in rep["predictions"]["P1b"] and "mean-rate decoder" in rep["predictions"]["P1b"]["result"]
     v = rep["verdicts"]
     assert set(v) == set(PREDICTIONS)
     assert v["P2"] == "supported"

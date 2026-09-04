@@ -69,17 +69,25 @@ class NormalizedReadIn(nn.Module):
 
 
 class CausalBandPower(nn.Module):
-    """Fixed causal Gabor filterbank: band power of a population rate trace from *past bins only*.
+    """Causal filterbank: band power of a population rate trace from *past bins only*.
 
     For every band a Hann-windowed cosine/sine pair at the band's geometric centre frequency is convolved
     with left padding only (output at bin t sees bins t-nper+1 .. t). A causal running mean over the same
     window is subtracted first (masked so that truncated contexts do not leak zeros into the mean).
+
+    ``mode='bands'``: the Gabor kernels are fixed (an STFT with a causal Hann window, one centre frequency per
+    band).  ``mode='learned'``: the same kernels are the *initialisation* of a learned causal filterbank - every
+    quadrature pair is a free parameter, so the branch can move its centre frequencies, bandwidths and shapes to
+    whatever spectro-temporal feature of the population rate carries information about the upcoming action;
+    it can only match or improve on the fixed bank in training, and stays causal by construction (left padding).
     ``mode='popmean'`` returns just the causal running mean (one channel) - the matched control that has
     the same window and the same gating but no spectral information.
     """
 
     def __init__(self, bin_ms: float, bands: dict[str, list[float]], win_ms: float = 300.0, mode: str = "bands"):
         super().__init__()
+        if mode not in ("bands", "learned", "popmean"):
+            raise ValueError(f"spectral branch mode must be bands | learned | popmean, got {mode!r}")
         self.mode = mode
         dt = bin_ms / 1000.0
         self.nper = max(4, int(round(win_ms / bin_ms)))
@@ -91,7 +99,11 @@ class CausalBandPower(nn.Module):
             fc = math.sqrt(max(lo, 0.5) * hi)
             kernels.append(hann * torch.cos(2 * math.pi * fc * t))
             kernels.append(hann * torch.sin(2 * math.pi * fc * t))
-        self.register_buffer("kernel", torch.stack(kernels)[:, None, :])          # (2*n_bands, 1, nper)
+        kern = torch.stack(kernels)[:, None, :]                                     # (2*n_bands, 1, nper)
+        if mode == "learned":
+            self.kernel = nn.Parameter(kern)
+        else:
+            self.register_buffer("kernel", kern)
         self.register_buffer("mean_kernel", torch.ones(1, 1, self.nper) / self.nper)
 
     @property
@@ -129,38 +141,56 @@ def time_to_go_encoding(T: int, d: int) -> torch.Tensor:
 
 
 class CountReadout(nn.Module):
-    """The *wide* path of the classifier: a linear read-out of each selected neuron's mean sqrt-count over the
-    visible context and over the last ``late_bins`` (the same two features per unit as the linear baseline),
-    standardised with statistics of the training trials (buffers set by ``DelayCASTNet.fit_count_stats``) and
-    multiplied by the neuron gates.  Its logits are *added* to the backbone classifier's, so the network contains
-    the tuned linear decoder as a special case and the TCN/Transformer path only has to learn what a linear
-    read-out of mean rates cannot express.  Zero-initialised: at the start the classifier is the backbone alone.
+    """The *wide* path of the classifier: a linear read-out of ``n_feat`` mean sqrt-count features per selected
+    neuron - over the visible context, over its last ``late_bins`` (the two features of the linear baseline) and
+    over ``n_feat - 2`` equal windows of the context (a time-resolved linear decoder: which part of the delay
+    carries the side is then a learned weight, not an assumption) - standardised with statistics of the training
+    trials (buffers set by ``DelayCASTNet.fit_count_stats``) and multiplied by the neuron gates.  A feature whose
+    window holds no visible bin (context sweep, window occlusion) is zeroed *after* standardisation, so an
+    invisible window contributes nothing rather than "the mean".  Its logits are *added* to the backbone
+    classifier's, so the network contains the tuned linear decoder as a special case and the TCN/Transformer path
+    only has to learn what a linear read-out of windowed rates cannot express.  Zero-initialised: at the start the
+    classifier is the backbone alone.
     """
 
-    def __init__(self, k: int, n_classes: int):
+    def __init__(self, k: int, n_classes: int, n_feat: int = 2):
         super().__init__()
-        self.lin = nn.Linear(2 * k, n_classes)
+        self.k, self.n_feat = k, n_feat
+        self.lin = nn.Linear(n_feat * k, n_classes)
         nn.init.zeros_(self.lin.weight)
         nn.init.zeros_(self.lin.bias)
-        self.register_buffer("mu", torch.zeros(2 * k))
-        self.register_buffer("sd", torch.ones(2 * k))
+        self.register_buffer("mu", torch.zeros(n_feat * k))
+        self.register_buffer("sd", torch.ones(n_feat * k))
 
-    def forward(self, feats: torch.Tensor, gates: torch.Tensor, nm: torch.Tensor | None) -> torch.Tensor:  # feats (B, 2K)
-        z = (feats - self.mu) / self.sd
-        z = z * torch.cat([gates, gates])[None, :]
+    def forward(self, feats: torch.Tensor, fvalid: torch.Tensor, gates: torch.Tensor, nm: torch.Tensor | None) -> torch.Tensor:
+        """feats, fvalid: (B, n_feat*K); gates: (K,); nm: (B, K) or None."""
+        z = (feats - self.mu) / self.sd * fvalid
+        z = z * gates.repeat(self.n_feat)[None, :]
         if nm is not None:
-            z = z * torch.cat([nm, nm], dim=1)
+            z = z * nm.repeat(1, self.n_feat)
         return self.lin(z)
+
+
+class UnitStats(nn.Module):
+    """Per-unit training statistics of one region of one session: mean / sd of the sqrt-count per bin (input
+    standardisation of the backbone) and the mean response-epoch count per target bin (forecast-loss scale)."""
+
+    def __init__(self, k: int):
+        super().__init__()
+        self.register_buffer("mu", torch.zeros(k))
+        self.register_buffer("sd", torch.ones(k))
+        self.register_buffer("rate", torch.ones(k))
 
 
 class SessionAdapter(nn.Module):
     """Session-specific read-in / gates / read-out for the four regions."""
 
-    def __init__(self, k: int, n_spec: int, d_model: int, t_tgt: int):
+    def __init__(self, k: int, n_spec: int, d_model: int, t_tgt: int, n_feat: int = 2):
         super().__init__()
         self.gates = nn.ModuleDict({r: NeuronGate(k, init=1.0) for r in REGIONS})
         self.read_in = nn.ModuleDict({r: NormalizedReadIn(k + n_spec, d_model) for r in REGIONS})
-        self.skip = nn.ModuleDict({r: CountReadout(k, len(CLASSES)) for r in REGIONS})
+        self.skip = nn.ModuleDict({r: CountReadout(k, len(CLASSES), n_feat) for r in REGIONS})
+        self.stats = nn.ModuleDict({r: UnitStats(k) for r in REGIONS})
         self.read_out = nn.ModuleDict({r: nn.Linear(d_model, k) for r in REGIONS})
         self.log_base = nn.ParameterDict({r: nn.Parameter(torch.zeros(k)) for r in REGIONS})
         # Persistence path: weight of each neuron's own late-delay log-rate in its response forecast.  This
@@ -177,16 +207,22 @@ class DelayCASTNet(nn.Module):
         self.k, self.t_ctx, self.t_tgt = k, t_ctx, t_tgt
         self.late_bins = int(m.get_path("persistence_late_bins", 20))
         self.count_scale = float(cfg.data.target_bin_ms) / float(cfg.data.bin_ms)  # ctx-bin counts -> target-bin counts
+        self.n_windows = max(0, int(m.get_path("skip_windows", 4)))                 # time windows of the wide path
+        self.n_feat = 2 + self.n_windows
+        self.standardize_input = bool(m.get_path("standardize_input", True))
+        self.forecast_norm = str(cfg.train.get_path("forecast_norm", "mean_count"))
+        self.forecast_norm_floor = float(cfg.train.get_path("forecast_norm_floor", 0.1))
+        self.max_log_rate = float(m.get_path("max_log_rate", 7.0))
         # ---- spectral branch (in-model, causal)
-        branch = str(m.get_path("spectral_branch", "bands" if bool(m.get_path("use_spectral_branch", True)) else "none"))
+        branch = str(m.get_path("spectral_branch", "learned" if bool(m.get_path("use_spectral_branch", True)) else "none"))
         bands = {kk: list(v) for kk, v in cfg.selection.bands_hz.items()}
         self.spectral_branch = branch
         self.bandpower = CausalBandPower(float(cfg.data.bin_ms), bands, float(m.get_path("spectral_win_ms", 300.0)),
-                                         mode="popmean" if branch == "popmean" else "bands") if branch != "none" else None
+                                         mode=branch) if branch != "none" else None
         self.n_spec = self.bandpower.n_out if self.bandpower is not None else 0
         if n_spec is not None and n_spec != self.n_spec:
             raise ValueError(f"checkpoint has n_spec={n_spec} but config gives {self.n_spec} (spectral_branch={branch})")
-        self.adapters = nn.ModuleDict({_key(s): SessionAdapter(k, self.n_spec, d, t_tgt) for s in sessions})
+        self.adapters = nn.ModuleDict({_key(s): SessionAdapter(k, self.n_spec, d, t_tgt, self.n_feat) for s in sessions})
         self.tcn = DilatedCausalTCN(d, d, int(m.tcn_blocks), int(m.kernel_size), float(m.dropout))
         # ---- position: fixed time-to-go encoding (or learned / none)
         self.pos_mode = str(m.get_path("positional_encoding", "sinusoidal"))
@@ -214,34 +250,67 @@ class DelayCASTNet(nn.Module):
 
     # ------------------------------------------------------------------ count read-out statistics
     @staticmethod
-    def count_features(x: torch.Tensor, valid: torch.Tensor, late_bins: int) -> torch.Tensor:
-        """(B, 2K): masked mean sqrt-count of every unit over the visible context and over its last ``late_bins``."""
+    def count_features(x: torch.Tensor, valid: torch.Tensor, late_bins: int, n_windows: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
+        """(features, validity), both (B, (2 + n_windows) K): masked mean sqrt-count of every unit over the visible
+        context, over its last ``late_bins``, and over ``n_windows`` equal windows of the context; validity is 1
+        where the window holds at least one visible bin."""
         sq = torch.sqrt(x)
-        f_all = (sq * valid[:, None, :]).sum(-1) / valid.sum(-1, keepdim=True).clamp(min=1)
-        v_late = valid[:, -late_bins:]
-        f_late = (sq[:, :, -late_bins:] * v_late[:, None, :]).sum(-1) / v_late.sum(-1, keepdim=True).clamp(min=1)
-        return torch.cat([f_all, f_late], dim=1)
+        B, K, T = sq.shape
+        feats, fval = [], []
+
+        def window(sl: slice) -> None:
+            v = valid[:, sl]
+            n = v.sum(-1, keepdim=True)
+            feats.append((sq[:, :, sl] * v[:, None, :]).sum(-1) / n.clamp(min=1))
+            fval.append((n > 0).to(sq.dtype).expand(B, K))
+
+        window(slice(0, T))
+        window(slice(T - late_bins, T))
+        edges = torch.linspace(0, T, n_windows + 1).round().long().tolist() if n_windows else []
+        for a, b in zip(edges[:-1], edges[1:]):
+            window(slice(int(a), max(int(b), int(a) + 1)))
+        return torch.cat(feats, dim=1), torch.cat(fval, dim=1)
+
+    def forecast_scale(self, session: str, r: str) -> torch.Tensor | None:
+        """(K,) per-unit divisor of the Poisson forecast loss (training mean count per target bin, floored), or
+        None when ``train.forecast_norm`` is ``none``.  With it the gradient of the forecast term is O(1) per unit
+        whatever the count scale - single units or population channels - instead of growing with the rate."""
+        if self.forecast_norm == "none":
+            return None
+        return self.adapters[_key(session)].stats[r].rate.clamp(min=self.forecast_norm_floor)
 
     @torch.no_grad()
-    def fit_count_stats(self, session: str, x: dict[str, np.ndarray | torch.Tensor]) -> None:
-        """Standardisation of the count read-out from the given trials (training / adaptation trials only)."""
+    def fit_count_stats(self, session: str, x: dict[str, np.ndarray | torch.Tensor], y: dict | None = None) -> None:
+        """Per-unit statistics from the given trials (training / adaptation trials only, never test): standardisation
+        of the count read-out features and of the backbone input, and the mean response count for the forecast
+        loss scale (``y``: response-epoch counts of the same trials)."""
         ad: SessionAdapter = self.adapters[_key(session)]
         for r in REGIONS:
             xr = torch.as_tensor(np.asarray(x[r]), dtype=torch.float32)
             if xr.ndim != 3 or xr.shape[0] == 0:
                 continue
             valid = torch.ones(xr.shape[0], xr.shape[2])
-            f = self.count_features(xr, valid, self.late_bins)
+            f, _ = self.count_features(xr, valid, self.late_bins, self.n_windows)
             mu, sd = f.mean(0), f.std(0, unbiased=False)
             sd = torch.where(sd > 1e-6, sd, torch.ones_like(sd))
             ad.skip[r].mu.copy_(mu.to(ad.skip[r].mu.device))
             ad.skip[r].sd.copy_(sd.to(ad.skip[r].sd.device))
+            sq = torch.sqrt(xr)
+            imu, isd = sq.mean((0, 2)), sq.std((0, 2), unbiased=False)
+            isd = torch.where(isd > 1e-6, isd, torch.ones_like(isd))
+            st = ad.stats[r]
+            st.mu.copy_(imu.to(st.mu.device))
+            st.sd.copy_(isd.to(st.sd.device))
+            if y is not None and r in y:
+                yr = torch.as_tensor(np.asarray(y[r]), dtype=torch.float32)
+                if yr.ndim == 3 and yr.shape[0]:
+                    st.rate.copy_(yr.mean((0, 2)).to(st.rate.device))
 
     # ------------------------------------------------------------------ session handling
     def add_session(self, session: str) -> None:
         if _key(session) not in self.adapters:
             d = self.dec_in.out_features
-            self.adapters[_key(session)] = SessionAdapter(self.k, self.n_spec, d, self.t_tgt)
+            self.adapters[_key(session)] = SessionAdapter(self.k, self.n_spec, d, self.t_tgt, self.n_feat)
 
     def adapter_parameters(self, session: str, include_gates: bool = True):
         for name, p in self.adapters[_key(session)].named_parameters():
@@ -278,8 +347,9 @@ class DelayCASTNet(nn.Module):
             nm = None if neuron_mask is None else neuron_mask[r].to(ref.dtype)                      # (B, K)
             if drop_region == r:
                 xr_raw = torch.zeros_like(xr_raw)
-            if self.linear_skip:   # wide path: gated, standardised mean counts of the visible context (drop = zero input)
-                skip_logits = skip_logits + ad.skip[r](self.count_features(xr_raw, valid, lb), ad.gates[r].gates(), nm)
+            if self.linear_skip:   # wide path: gated, standardised windowed mean counts of the visible context (drop = zero input)
+                feats, fvalid = self.count_features(xr_raw, valid, lb, self.n_windows)
+                skip_logits = skip_logits + ad.skip[r](feats, fvalid, ad.gates[r].gates(), nm)
             # Persistence input: masked mean count of the last ``lb`` valid bins.
             v_late = valid[:, None, -lb:]
             late = (xr_raw[:, :, -lb:] * v_late).sum(-1) / v_late.sum(-1).clamp(min=1)
@@ -287,12 +357,19 @@ class DelayCASTNet(nn.Module):
             if late_log_override is not None and r in late_log_override:
                 ll = late_log_override[r]
             late_log[r] = ll
-            xr = ad.gates[r](torch.sqrt(xr_raw)) * valid[:, None, :]                                # gated, variance-stabilised
+            sq = torch.sqrt(xr_raw)                                                                  # variance-stabilised counts
+            xr_pop = ad.gates[r](sq) * valid[:, None, :]                                             # gated, non-negative (population trace)
+            if nm is not None:
+                xr_pop = xr_pop * nm[:, :, None]
+            if self.standardize_input:   # per-unit z-score with training statistics: every unit enters on the same scale
+                st = ad.stats[r]
+                sq = (sq - st.mu[None, :, None]) / st.sd[None, :, None]
+            xr = ad.gates[r](sq) * valid[:, None, :]
             if nm is not None:
                 xr = xr * nm[:, :, None]
             if self.bandpower is not None:
                 denom = (nm.sum(1) if nm is not None else torch.full((B,), float(self.k), device=ref.device)).clamp(min=1)
-                pop = xr.sum(1) / denom[:, None]                                                     # (B, T) gated population
+                pop = xr_pop.sum(1) / denom[:, None]                                                 # (B, T) gated population rate
                 sp = self.bandpower(pop, valid)                                                      # (B, n_spec, T), causal
                 spec_used[r] = sp
                 xr = torch.cat([xr, sp], dim=1)
@@ -325,9 +402,19 @@ def _key(session: str) -> str:
     return session.replace("/", "__").replace(".", "_")
 
 
-def poisson_nll(log_rate: torch.Tensor, counts: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
-    """Poisson negative log-likelihood per bin, averaged over valid (non-padded) neurons."""
-    nll = torch.exp(log_rate) - counts * log_rate
+def poisson_nll(log_rate: torch.Tensor, counts: torch.Tensor, mask: torch.Tensor | None = None,
+                scale: torch.Tensor | None = None, max_log_rate: float = 7.0) -> torch.Tensor:
+    """Poisson negative log-likelihood per bin, averaged over valid (non-padded) neurons.
+
+    ``scale`` (K,) divides every neuron's NLL by its training mean count (see ``DelayCASTNet.forecast_scale``):
+    the gradient (rate - count) / scale is then O(1) per neuron regardless of the count magnitude, so the forecast
+    term neither swamps the classification loss for population channels (counts of tens per bin) nor vanishes for
+    sparse single units.  The log-rate is clamped at ``max_log_rate`` (e^7 ~ 1100 counts per bin, far above any
+    real value) so that one runaway prediction cannot blow the loss up."""
+    lr = log_rate.clamp(max=max_log_rate)
+    nll = torch.exp(lr) - counts * lr
+    if scale is not None:
+        nll = nll / scale.to(nll.dtype)[None, :, None]
     if mask is not None:  # mask: (B, K) True for real neurons
         nll = nll * mask[:, :, None]
         return nll.sum() / (mask.sum() * log_rate.shape[-1]).clamp(min=1)
