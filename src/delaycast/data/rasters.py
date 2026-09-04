@@ -119,6 +119,46 @@ def _times(data, key: str) -> np.ndarray:
     return _to_times(data[key])
 
 
+def parse_time_list(value) -> np.ndarray:
+    """Lick times as written in the behavioural logs: a float, a "t1, t2; t3" string, a list, or NaN / "N/A" / ""."""
+    if value is None:
+        return _EMPTY
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return _to_times(np.asarray(value, dtype=object))
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return _EMPTY if not np.isfinite(float(value)) else np.asarray([float(value)])
+    text = str(value).strip().strip("[]()")
+    if text.lower() in ("", "nan", "n/a", "none", "null"):
+        return _EMPTY
+    out = []
+    for part in re.split(r"[,;\s]+", text):
+        if not part:
+            continue
+        try:
+            out.append(float(part))
+        except ValueError:
+            continue
+    return np.asarray(out, dtype=float) if out else _EMPTY
+
+
+def unit_ids_by_region(npz_path) -> dict[str, np.ndarray] | None:
+    """Unit IDs per canonical region of one combined-schema NPZ, reading only the two small arrays.
+
+    ``np.load`` of an NPZ is lazy per member, so this never decompresses ``spike_times``; it is what the cache
+    builder uses in its first pass to learn the unit universe of a session.  Returns ``None`` for the pre-split
+    schema (no IDs) or when the IDs of a trial are not unique (then position is the only usable identity).
+    """
+    data = np.load(npz_path, allow_pickle=True)
+    if "brain_region" not in data.files or "unit_ids" not in data.files:
+        return None
+    regions_raw = np.asarray(data["brain_region"]).astype(str).ravel()
+    ids = np.asarray(data["unit_ids"]).ravel()
+    if ids.size != regions_raw.size or len(np.unique(ids)) != ids.size:
+        return None
+    canon = np.array([normalize_region(region) or "unknown" for region in regions_raw])
+    return {r: ids[canon == r] for r in REGIONS}
+
+
 @dataclass
 class TrialRasters:
     """Rasters for one trial. ``context[r]``: (n_units_r, T_ctx) uint8 counts, ``target[r]``: (n_units_r, T_tgt)."""
@@ -296,11 +336,19 @@ def spikes_by_region(data) -> dict[str, tuple[list[np.ndarray], np.ndarray]]:
 _spikes_by_region = spikes_by_region
 
 
-def load_trial_rasters(npz_path, cfg, metadata: dict | None = None) -> TrialRasters:
+def load_trial_rasters(npz_path, cfg, metadata: dict | None = None,
+                       unit_index: dict[str, np.ndarray] | None = None) -> TrialRasters:
     """Bin spikes into the context (delay) and target (response) windows defined by the config.
 
     Both rasters are uint8 count matrices produced by ``bin_units``; the context window ends at the go cue
     and the target window starts at it, so the two never overlap (a spike exactly at go belongs to the target).
+
+    ``unit_index`` (region -> array of unit IDs, the session's unit universe) aligns the rows of every trial by
+    unit ID instead of by position: a unit of the universe that is absent from this trial's NPZ gets a row of
+    zeros (the Data2 export omits units without spikes in the trial), and its absence is counted in
+    ``qc['n_units_absent']``.  Lick times come from the NPZ when it has them and from the behavioural-log row
+    (``metadata['left_lick_times']`` / ``['right_lick_times']``) otherwise; ``qc['lick_source']`` records which
+    (``npz`` | ``csv`` | ``none``), because without any lick record the folder label cannot be verified.
     """
     data = np.load(npz_path, allow_pickle=True)
     ep = read_epochs(data, metadata)
@@ -335,26 +383,57 @@ def load_trial_rasters(npz_path, cfg, metadata: dict | None = None) -> TrialRast
     )
     region_data = spikes_by_region(data)
     context, target, uids = {}, {}, {}
+    n_absent, n_extra = {}, {}
     for r in REGIONS:
         spikes, region_ids = region_data[r]
-        context[r] = bin_units(spikes, ctx_start, n_ctx, bin_s)
-        target[r] = bin_units(spikes, go_start, n_tgt, tbin_s)
+        cx = bin_units(spikes, ctx_start, n_ctx, bin_s)
+        tg = bin_units(spikes, go_start, n_tgt, tbin_s)
+        if unit_index is not None:
+            universe = np.asarray(unit_index[r]).ravel()
+            pos = {int(u): i for i, u in enumerate(universe.tolist())}
+            rows = np.array([pos.get(int(u), -1) for u in np.asarray(region_ids).ravel().tolist()], dtype=int)
+            cx_al = np.zeros((len(universe), cx.shape[1]), dtype=cx.dtype)
+            tg_al = np.zeros((len(universe), tg.shape[1]), dtype=tg.dtype)
+            ok = rows >= 0
+            cx_al[rows[ok]] = cx[ok]
+            tg_al[rows[ok]] = tg[ok]
+            n_extra[r] = int((~ok).sum())
+            n_absent[r] = int(len(universe) - ok.sum())
+            cx, tg, region_ids = cx_al, tg_al, universe
+        context[r] = cx
+        target[r] = tg
         uids[r] = region_ids
 
+    has_npz_licks = "left_lick_times" in data.files or "right_lick_times" in data.files
     lick_left = _times(data, "left_lick_times")
     lick_right = _times(data, "right_lick_times")
+    lick_source = "npz" if has_npz_licks else "none"
+    has_csv_licks = bool(metadata) and any(k in metadata for k in ("left_lick_times", "right_lick_times"))
+    if not has_npz_licks and has_csv_licks:
+        lick_left = parse_time_list(metadata.get("left_lick_times"))
+        lick_right = parse_time_list(metadata.get("right_lick_times"))
+        lick_source = "csv"
     qc = {
         "n_unknown_region": int(n_unknown_region),
         "early_lick": bool(np.any(np.concatenate([lick_left, lick_right]) < go_start)) if (lick_left.size + lick_right.size) else False,
         "licked_left": bool(np.any(lick_left >= go_start)),
         "licked_right": bool(np.any(lick_right >= go_start)),
+        "lick_source": lick_source,
         "delay_len_s": float(go_start - delay_start),
+        "n_units_absent": n_absent,
+        "n_units_extra": n_extra,
     }
     return TrialRasters(context, target, uids, ep, ctx_edges, tgt_edges, lick_left, lick_right, qc)
 
 
 def label_from_licks(qc: dict) -> str | None:
-    """Behavioural label implied by the lick times (None when ambiguous, e.g. licked both sides)."""
+    """Behavioural label implied by the lick times.
+
+    ``None`` when no lick record exists at all (``lick_source == 'none'``: nothing to check the folder label
+    against); ``"Both"`` when the animal licked both sides after the go cue (ambiguous action).
+    """
+    if qc.get("lick_source", "npz") == "none":
+        return None
     l, r = qc.get("licked_left", False), qc.get("licked_right", False)
     if l and not r:
         return "Left"
@@ -362,4 +441,4 @@ def label_from_licks(qc: dict) -> str | None:
         return "Right"
     if not l and not r:
         return "Ignore"
-    return None
+    return "Both"

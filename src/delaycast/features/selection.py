@@ -460,12 +460,14 @@ def _topk(df: pd.DataFrame, cfg, by: list[str]) -> dict[str, np.ndarray]:
 
 
 def _stratified_subsample(labels: np.ndarray, frac: float, rng: np.random.Generator) -> np.ndarray:
+    """Indices of a stratified subsample (without replacement) of ``frac`` of every class; empty input -> empty."""
+    labels = np.asarray(labels)
     idx = []
     for c in np.unique(labels):
         ii = np.flatnonzero(labels == c)
         n = min(len(ii), max(2, int(round(frac * len(ii)))))
         idx.append(rng.choice(ii, size=n, replace=False))
-    return np.sort(np.concatenate(idx))
+    return np.sort(np.concatenate(idx)) if idx else np.zeros(0, dtype=int)
 
 
 # --------------------------------------------------------------------------- public API
@@ -701,6 +703,12 @@ def selection_summary(results: list[SelectionResult]) -> pd.DataFrame:
             row["median_stability_selected"] = float(t.loc[t.selected, "stability"].median())
             row["median_onset_ms_selected"] = float(t.loc[t.selected, "onset_ms"].median()) if "onset_ms" in t else np.nan
             row["frac_sustained_to_go_selected"] = float(t.loc[t.selected, "sustained_to_go"].mean()) if "sustained_to_go" in t else np.nan
+        if len(t) and "stability" in t:
+            el = t[t.eligible]
+            # how far the eligible units are from the stability threshold (diagnostic for sessions that select nothing)
+            row["max_stability_eligible"] = float(el.stability.max()) if len(el) else np.nan
+            row["n_eligible_stab_ge_0.5"] = int((el.stability >= 0.5).sum())
+            row["n_eligible_stab_ge_0.4"] = int((el.stability >= 0.4).sum())
         if res.null_stability is not None and res.null_stability.size:
             row["null_median_stability_max"] = float(np.max(res.null_stability))
         if len(res.funnel):

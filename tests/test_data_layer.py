@@ -133,6 +133,28 @@ def _write_b(tmp_path: Path, trial: int, cls: str, payload: dict) -> Path:
     return d / f"trial{trial}.npz"
 
 
+def _write_b_csv(tmp_path: Path, rows: list[dict]) -> Path:
+    sess = tmp_path / "Data2" / "sub-1" / "sub-1_ses-20190301T120000_behavior+ecephys"
+    sess.mkdir(parents=True, exist_ok=True)
+    p = sess / "behavioral_master_log_audited.csv"
+    pd.DataFrame(rows).to_csv(p, index=False)
+    return p
+
+
+def _without_units(payload: dict, drop_uids: list[int]) -> dict:
+    """The same trial with some units missing from the NPZ (how the Data2 export treats units without spikes)."""
+    keep = ~np.isin(np.asarray(payload["unit_ids"]), drop_uids)
+    out = dict(payload)
+    out["unit_ids"] = np.asarray(payload["unit_ids"])[keep]
+    out["brain_region"] = np.asarray(payload["brain_region"])[keep]
+    out["spike_times"] = _object_array([s for s, k in zip(payload["spike_times"], keep) if k])
+    return out
+
+
+def _strip_licks(payload: dict) -> dict:
+    return {k: v for k, v in payload.items() if k not in ("left_lick_times", "right_lick_times")}
+
+
 # ----------------------------------------------------------------------------- rasters.py
 def test_as_unit_list_layouts():
     a, b = np.array([0.5, 1.0, 2.5]), np.array([0.1])
@@ -277,9 +299,10 @@ def test_build_cache_qc_drops_and_length_fixes(tmp_path, caplog):
     _write_a(tmp_path, "Session1", 3, "Left", _payload(rng, n_units, "Left", t0=20.0, delay_s=1.3))
     long_payload = _payload(rng, n_units, "Ignore", t0=30.0, delay_s=1.208)
     _write_a(tmp_path, "Session1", 4, "Ignore", long_payload)
-    # Session2: the second trial has one unit more in STR_L -> that trial is dropped, the session survives
+    # Session2: the second trial lacks one STR_L unit (uid 10; the Data2 export omits units without spikes) ->
+    # rows are aligned by unit ID, the absent unit gets a zero row and the trial is kept
     _write_a(tmp_path, "Session2", 1, "Left", _payload(rng, n_units, "Left", t0=0.0))
-    _write_a(tmp_path, "Session2", 2, "Right", _payload(rng, {**n_units, "STR_L": 4}, "Right", t0=10.0))
+    _write_a(tmp_path, "Session2", 2, "Right", _without_units(_payload(rng, n_units, "Right", t0=10.0), [10]))
     _write_a(tmp_path, "Session2", 3, "Right", _payload(rng, n_units, "Right", t0=20.0))
     cfg = _cfg(tmp_path)
     assert float(cfg.data.qc.max_delay_dev_ms) == 15.0
@@ -289,7 +312,11 @@ def test_build_cache_qc_drops_and_length_fixes(tmp_path, caplog):
     assert set(caches) == {"A/Session1", "A/Session2"}
     s1, s2 = caches["A/Session1"], caches["A/Session2"]
     assert s1.trials.tolist() == [1, 2, 4] and s1.labels.tolist() == [1, 2, 0]
-    assert s2.trials.tolist() == [1, 3]
+    assert s2.trials.tolist() == [1, 2, 3] and s2.unit_ids["STR_L"].tolist() == [9, 10, 11]
+    assert not s2.context["STR_L"][1, 1].any() and not s2.target["STR_L"][1, 1].any()   # absent unit = silent
+    assert s2.context["STR_L"][1, 0].any() or s2.context["STR_L"][1, 2].any()
+    assert s2.qc_info["unit_alignment"] == "id" and s2.qc_info["units_union"] == 14 and s2.qc_info["units_per_trial_min"] == 13
+    assert s1.qc_info["unit_presence_median"]["STR_L"] == 1.0
     for c in (s1, s2):
         for r in REGIONS:
             assert c.context[r].dtype == np.uint8 and c.context[r].shape == (c.n_trials, n_units[r], 120)
@@ -301,9 +328,8 @@ def test_build_cache_qc_drops_and_length_fixes(tmp_path, caplog):
     r3 = qc[(qc.session == "A/Session1") & (qc.trial == 3)].iloc[0]
     assert not r3.kept and r3.reason.startswith("delay_len_") and r3.reason == "delay_len_1.30s"
     r2 = qc[(qc.session == "A/Session2") & (qc.trial == 2)].iloc[0]
-    assert not r2.kept and r2.reason == "unit_count_mismatch:STR_L:4!=3"
-    assert any("unit_count_mismatch:STR_L:4!=3" in rec.message for rec in caplog.records)
-    assert qc[qc.kept].shape[0] == 5
+    assert r2.kept and r2.lick_source == "npz" and r2.lick_label == "Right"
+    assert qc[qc.kept].shape[0] == 6
 
     # The 1.208 s trial produced a 121-bin context; the cache keeps its LAST 120 bins (go-cue anchored) and
     # the length fix is counted in the JSON next to the arrays.
@@ -313,7 +339,7 @@ def test_build_cache_qc_drops_and_length_fixes(tmp_path, caplog):
     assert np.array_equal(s1.context["ALM_L"][0], load_trial_rasters(s1.meta.npz_path[0], cfg).context["ALM_L"])
     assert s1.qc_info["length_fixes"] == {"context": 1, "target": 0, "context_max_abs_bins": 1, "target_max_abs_bins": 0}
     assert s1.qc_info["n_kept"] == 3 and s1.qc_info["n_dropped"] == 1 and s1.qc_info["drop_reasons"] == {"delay_len": 1}
-    assert s2.qc_info["drop_reasons"] == {"unit_count_mismatch": 1}
+    assert s2.qc_info["drop_reasons"] == {}
     info = json.loads((cache_sub / "A__Session1.json").read_text())
     assert info["length_fixes"]["context"] == 1 and info["max_delay_dev_ms"] == 15.0
     # round trip through disk keeps everything (including qc_info)
@@ -543,3 +569,102 @@ def test_duplicate_sessions_are_detected_and_dropped():
     assert list(dup.session_a) == ["A/Session2"] and list(dup.session_b) == ["B/sub-1_ses-x"]
     kept = drop_duplicate_sessions([a_dup, a_other, b], load_config(None))
     assert sorted(c.session for c in kept) == ["A/Session1", "B/sub-1_ses-x"]
+
+
+def test_positional_alignment_without_unit_ids_drops_mismatched_trials(tmp_path, caplog):
+    """Pre-split schema (no IDs): a trial whose unit count differs cannot be aligned and is dropped."""
+    rng = np.random.default_rng(6)
+    n_units = {"ALM_L": 3, "ALM_R": 2, "STR_L": 2, "STR_R": 1}
+    _write_b(tmp_path, 1, "Left", _to_split(_payload(rng, n_units, "Left", t0=0.0)))
+    _write_b(tmp_path, 2, "Right", _to_split(_payload(rng, {**n_units, "STR_L": 3}, "Right", t0=10.0)))
+    _write_b(tmp_path, 3, "Right", _to_split(_payload(rng, n_units, "Right", t0=20.0)))
+    cfg = _cfg(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="delaycast.data.cache"):
+        (c,) = build_cache(cfg, force=True)
+    assert c.trials.tolist() == [1, 3] and c.qc_info["unit_alignment"] == "positional"
+    assert c.qc_info["drop_reasons"] == {"unit_count_mismatch": 1}
+    assert any("unit_count_mismatch:STR_L:3!=2" in rec.message for rec in caplog.records)
+
+
+def test_data2_lick_times_from_csv_and_outcome_rule(tmp_path):
+    """Data2 NPZs carry no lick arrays: the behavioural-log row supplies them (string lists), and without any lick
+    record the folder label is kept unverified instead of being called 'Ignore'."""
+    from delaycast.data.rasters import parse_time_list
+
+    assert parse_time_list("2.80, 2.93; 3.1").tolist() == [2.8, 2.93, 3.1]
+    assert parse_time_list(2.5).tolist() == [2.5] and parse_time_list(float("nan")).size == 0
+    assert parse_time_list("N/A").size == 0 and parse_time_list("").size == 0 and parse_time_list(None).size == 0
+
+    rng = np.random.default_rng(7)
+    n_units = {"ALM_L": 3, "ALM_R": 2, "STR_L": 2, "STR_R": 1}
+    plan = {  # trial: (folder, t0, csv row or None)   go cue = t0 + 2.55
+        1: ("Left", 0.0, {"outcome": "hit", "early_lick": "no early", "left_lick_times": "2.80, 2.93, 3.05", "right_lick_times": ""}),
+        2: ("Right", 10.0, {"outcome": "hit", "early_lick": "early", "left_lick_times": "", "right_lick_times": "12.8"}),
+        3: ("Right", 20.0, {"outcome": "hit", "early_lick": "no early", "left_lick_times": "21.9", "right_lick_times": "22.8"}),
+        4: ("Left", 30.0, {"outcome": "hit", "early_lick": "no early", "left_lick_times": "", "right_lick_times": "32.8, 32.9"}),
+        5: ("Right", 40.0, {"outcome": "miss", "early_lick": "no early", "left_lick_times": "", "right_lick_times": "42.8"}),
+        6: ("Ignore", 50.0, None),
+        7: ("Left", 60.0, {"outcome": "hit", "early_lick": "no early", "left_lick_times": "62.8", "right_lick_times": "62.9"}),
+        8: ("Ignore", 70.0, {"outcome": "ignore", "early_lick": "no early", "left_lick_times": "", "right_lick_times": ""}),
+    }
+    rows = []
+    for tr, (cls, t0, row) in plan.items():
+        _write_b(tmp_path, tr, cls, _strip_licks(_payload(rng, n_units, cls, t0=t0)))
+        if row is not None:
+            rows.append({"trial": tr, "trial_instruction": "left" if cls == "Left" else "right", **row})
+    _write_b_csv(tmp_path, rows)
+
+    cfg = _cfg(tmp_path)
+    (c,) = build_cache(cfg, force=True)
+    assert c.trials.tolist() == [1, 5, 6, 8] and c.labels.tolist() == [1, 2, 0, 0]
+    assert c.meta.lick_source.tolist() == ["csv", "csv", "none", "csv"]
+    assert c.meta.csv_outcome.tolist() == ["hit", "miss", "", "ignore"]
+    assert c.qc_info["lick_sources"] == {"csv": 3, "none": 1}
+    cache_sub = next(p for p in (tmp_path / "cache").iterdir() if p.is_dir())
+    qc = pd.read_csv(cache_sub / "qc_log.csv").set_index("trial")
+    assert qc.loc[2, "reason"] == "csv_early_lick"
+    assert qc.loc[3, "reason"] == "early_lick_csv"
+    assert qc.loc[4, "reason"] == "label_mismatch(folder=Left,licks=Right)"
+    assert qc.loc[7, "reason"] == "licked_both_sides"
+    assert qc.loc[6, "kept"] and qc.loc[6, "lick_source"] == "none" and pd.isna(qc.loc[6, "lick_label"])
+    assert qc.loc[1, "lick_label"] == "Left"
+
+    # instruction-only analysis: error trials can be excluded through the config
+    cfg2 = _cfg(tmp_path, **{"data.qc.csv_keep_outcomes": ["hit", "ignore"], "data.cache_dir": str(tmp_path / "cache2")})
+    (c2,) = build_cache(cfg2, force=True)
+    assert c2.trials.tolist() == [1, 6, 8] and c2.qc_info["drop_reasons"]["csv_outcome_miss"] == 1
+
+
+def test_small_sessions_are_excluded_and_training_set_is_checked():
+    from delaycast.data.cache import drop_small_sessions
+    from delaycast.data.dataset import TrialDataset, tensors_from_indices
+    from delaycast.features.selection import _stratified_subsample
+    from delaycast.train import _check_training_set
+
+    def make(session, labels):
+        n = len(labels)
+        return SessionCache(session=session, dataset="B", subject=session,
+                            context={r: np.zeros((n, 2, 120), np.uint8) for r in REGIONS},
+                            target={r: np.zeros((n, 2, 30), np.uint8) for r in REGIONS},
+                            unit_ids={r: np.arange(2) for r in REGIONS}, labels=np.asarray(labels, int), trials=np.arange(n),
+                            meta=pd.DataFrame({"trial": np.arange(n)}), bin_ms=10.0, target_bin_ms=50.0)
+
+    cfg = load_config(None)
+    big, tiny, lopsided = make("B/big", [1, 2] * 20), make("B/tiny", [0]), make("B/lopsided", [1] * 40 + [2] * 3)
+    assert [c.session for c in drop_small_sessions([big, tiny, lopsided], cfg)] == ["B/big"]
+    cfg.set_path("data.min_trials_per_session", 1)
+    cfg.set_path("data.min_trials_per_lick_class", 0)
+    assert len(drop_small_sessions([big, tiny, lopsided], cfg)) == 3
+
+    assert _stratified_subsample(np.zeros(0, int), 0.5, np.random.default_rng(0)).size == 0
+    assert len(_stratified_subsample(np.array([1, 1, 1, 2, 2, 2]), 0.5, np.random.default_rng(0))) == 4
+
+    idx = {r: np.arange(2) for r in REGIONS}
+    t_big, t_tiny = tensors_from_indices(big, idx, cfg), tensors_from_indices(tiny, idx, cfg)
+    ok_train = TrialDataset([t_big], {"B/big": np.arange(30)})
+    ok_val = TrialDataset([t_big], {"B/big": np.arange(30, 40)})
+    _check_training_set(ok_train, ok_val, {"B/big": {"train": np.arange(30)}}, held=[])
+    with pytest.raises(RuntimeError, match="degenerate"):
+        _check_training_set(TrialDataset([t_tiny], {"B/tiny": np.arange(1)}), ok_val, {"B/tiny": {"train": np.arange(1)}}, held=["A/x"])
+    with pytest.raises(RuntimeError, match="degenerate"):
+        _check_training_set(ok_train, TrialDataset([t_big], {}), {"B/big": {"train": np.arange(30)}}, held=[])

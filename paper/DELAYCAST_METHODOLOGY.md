@@ -30,18 +30,35 @@ the upcoming action** — and whether that answer is the same across recordings.
 
 * **Dataset A** (`Data/Session*/Rasters/{Ignore,Left,Right}/trial_N.npz`): label = folder; every epoch time comes from
   the NPZ (`delay_start_times`, `go_start_times`, lick times). Videos are indexed but not used by the model.
-* **Dataset B** (`Data2/sub-*/sub-*_ses-*/NPZ/{Ignore,Left,Right}/trialN.npz`): label = folder, joined on `trial` with
-  the per-session `behavioral_master_log_audited.csv` (fallback `combined_audited_master_log.csv` via `session_dir`).
-  Rows are dropped if `excluded`, early lick, photostim, auto/free water, or outcome not in {hit, ignore}. Both NPZ
+* **Dataset B** (`Data2/sub-*/sub-*_ses-*/NPZ/{Ignore,Left,Right}/trialN.npz`): label = folder (the **observed** lick
+  side, or Ignore), joined on `trial` with the per-session `behavioral_master_log_audited.csv` (fallback
+  `combined_audited_master_log.csv` via `session_dir`). Rows are dropped if `excluded`, early lick, photostim, auto/free
+  water, or outcome not in `data.qc.csv_keep_outcomes` (default {hit, miss, ignore}: error trials are kept because
+  the class is the action, not the instruction; `[hit, ignore]` gives an instruction-only analysis). The Data2 NPZs
+  carry **no lick arrays** — lick times are taken from the log row (`left_lick_times` / `right_lick_times`, string
+  lists) — and contain **only the units that fired in the trial**, so unit counts differ from trial to trial. Both NPZ
   schemas are read (combined `brain_region`/`spike_times`, or pre-split `left_ALM_spikes`, …; object arrays, NaN-padded
   matrices and single-unit arrays are all accepted).
-* **NPZ-level QC** (both datasets): licks before the go cue → drop; folder label contradicted by the lick times or licks
-  on both sides → drop; delay length deviating from 1.2 s by more than `data.qc.max_delay_dev_ms` → drop; unit count
-  changing within a session → drop that trial. `cache/<key>/qc_log.csv` lists every excluded trial with its reason.
+* **Unit identity**: within a session, rows are aligned by `unit_ids` — the cache builder first collects the union of
+  IDs over all trials (order of first appearance), then places every trial's units by ID; a unit absent from a trial's
+  NPZ is a row of zeros (it was silent). Without IDs (pre-split schema) identity is positional and a trial whose unit
+  count differs from the session's is dropped. The cache JSON records the alignment mode and how many units each
+  trial contributed versus the union.
+* **NPZ-level QC** (both datasets): licks before the go cue → drop; folder label contradicted by the lick record
+  (NPZ arrays, else log row) or licks on both sides → drop; a trial with **no lick record anywhere** keeps its folder
+  label (it cannot be verified, `lick_source = none` in the metadata); delay length deviating from 1.2 s by more than
+  `data.qc.max_delay_dev_ms` → drop. `cache/<key>/qc_log.csv` lists every trial with its reason, lick source and log
+  outcome; `cache` prints the discovered / kept / drop-reason table and warns about any session that lost most of its
+  trials.
+* **Session minimums**: a session with fewer than `data.min_trials_per_session` (30) trials after QC, or fewer than
+  `data.min_trials_per_lick_class` (5) Left or Right trials, is excluded from every command with a warning — such a
+  session is a loading problem, not a small recording — and training refuses a degenerate corpus (< 20 training
+  trials, one class, or no validation trials) instead of producing a NaN validation curve.
 * **Duplicate recordings**: `Data/Session2-4` and three `Data2` sessions are the same recordings extracted twice
   (identical trial counts, class counts and absolute delay-onset timestamps). `cache` detects such pairs by their
-  epoch-timestamp fingerprint and every later command uses only the `Data2` copy (audited log), so no trial can sit
-  in the training set of one copy and the test set of the other, and cross-dataset transfer is a real transfer.
+  epoch-timestamp fingerprint and every later command uses only one copy (`data.duplicate_keep`, default the `Data2`
+  copy with the audited log; the table lists the unit counts of both exports), so no trial can sit in the training
+  set of one copy and the test set of the other, and cross-dataset transfer is a real transfer.
 * Spikes are binned once into **uint8** count tensors (context 10 ms, right-aligned at the go cue; target 50 ms,
   left-aligned at go) and cached per session; ≈ 100 MB per real session in RAM.
 
@@ -189,5 +206,10 @@ verdicts with the numbers.
   `Data` / `Data2` runs.
 * Ignore trials are rare: P5b is exploratory by design, sessions with < 3 Ignore test trials contribute Left/Right
   metrics only, and `logreg_trial_index` flags engagement confounds.
-* `Data` has no CSV log; its QC relies on the lick times stored in each NPZ.
+* `Data` has no CSV log; its QC relies on the lick times stored in each NPZ. `Data2` has no lick arrays in the NPZ;
+  its QC relies on the audited log. A Data2 trial without a log row is kept with an unverified label.
+* Small sessions (e.g. 153 trials with 109 lick trials) can select **no unit**: the criteria are met by some units but
+  none is re-selected in ≥ 60 % of half-subsamples. `select` prints how far the eligible units are from the threshold
+  (`max_stability_eligible`); such a session stays in the corpus with an empty criteria set and is reported as such.
+  `--set selection.min_stability=0.5` relaxes the threshold for every session (the false-selection bound still holds).
 * Unit identities are session-local; nothing is ever pooled across sessions by unit index.

@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 from .. import CLASSES, CLASS_TO_IDX, REGIONS
 from .discovery import TrialRecord, discover_all
-from .rasters import label_from_licks, load_trial_rasters
+from .rasters import label_from_licks, load_trial_rasters, unit_ids_by_region
 
 log = logging.getLogger(__name__)
 
@@ -128,14 +128,57 @@ def _csv_flags(rec: TrialRecord, cfg) -> tuple[bool, str]:
         except (TypeError, ValueError):
             pass
     outcome = str(row.get("outcome", "")).strip().lower()
-    if outcome not in ("hit", "ignore", ""):
+    keep_outcomes = cfg.data.qc.get_path("csv_keep_outcomes", ["hit", "miss", "ignore"])
+    keep_outcomes = {str(o).strip().lower() for o in (keep_outcomes if isinstance(keep_outcomes, (list, tuple)) else str(keep_outcomes).split(","))}
+    if outcome not in keep_outcomes and outcome not in ("", "nan"):
         return False, f"csv_outcome_{outcome}"
     return True, ""
 
 
 def _cache_key(cfg) -> str:
     c = cfg.data
-    return f"bin{c.bin_ms}_tbin{c.target_bin_ms}_ctx{int(c.context.include_sample)}_{c.context.pre_delay_ms}_resp{c.target.response_ms}"
+    # ``_v2``: unit alignment by ID, lick times from the behavioural log, miss trials kept - caches built by the
+    # positional loader are not comparable and are rebuilt automatically.
+    return f"bin{c.bin_ms}_tbin{c.target_bin_ms}_ctx{int(c.context.include_sample)}_{c.context.pre_delay_ms}_resp{c.target.response_ms}_v2"
+
+
+def _unit_universe(recs: list[TrialRecord]) -> tuple[dict[str, np.ndarray] | None, dict]:
+    """First pass over a session: the union of unit IDs per region across all its trials (order of first appearance).
+
+    Reads only ``unit_ids`` / ``brain_region`` (cheap).  Returns ``(None, info)`` when the NPZs carry no usable
+    IDs (pre-split schema, or duplicated IDs), in which case rows are aligned by position and a trial whose unit
+    count differs from the session's is dropped.  ``info`` reports how many units each trial contributed versus
+    the union, which is how an "active units only" export (Data2) shows up: the union is larger than any
+    single trial.
+    """
+    universe: dict[str, list] = {r: [] for r in REGIONS}
+    seen: dict[str, set] = {r: set() for r in REGIONS}
+    presence: dict[str, dict] = {r: {} for r in REGIONS}
+    per_trial = []
+    for rec in recs:
+        try:
+            ids = unit_ids_by_region(rec.npz_path)
+        except Exception:  # unreadable file: reported again (with the reason) by the binning pass
+            continue
+        if ids is None:
+            return None, {"unit_alignment": "positional"}
+        n_tr = 0
+        for r in REGIONS:
+            for u in np.asarray(ids[r]).ravel().tolist():
+                if u not in seen[r]:
+                    seen[r].add(u)
+                    universe[r].append(u)
+                presence[r][u] = presence[r].get(u, 0) + 1
+            n_tr += len(ids[r])
+        per_trial.append(n_tr)
+    if not per_trial:
+        return None, {"unit_alignment": "positional"}
+    out = {r: np.asarray(universe[r]) for r in REGIONS}
+    n_union = int(sum(len(v) for v in out.values()))
+    info = {"unit_alignment": "id", "units_union": n_union, "units_per_trial_median": float(np.median(per_trial)),
+            "units_per_trial_min": int(np.min(per_trial)), "units_per_trial_max": int(np.max(per_trial)),
+            "unit_presence_median": {r: (float(np.median(list(presence[r].values())) / len(recs)) if presence[r] else np.nan) for r in REGIONS}}
+    return out, info
 
 
 def build_cache(cfg, force: bool = False) -> list[SessionCache]:
@@ -175,6 +218,10 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
             caches.append(SessionCache.load(out_path))
             continue
         recs = sorted(recs, key=lambda x: x.trial)
+        unit_index, align_info = _unit_universe(recs)
+        if unit_index is not None and align_info["units_per_trial_min"] < align_info["units_union"]:
+            log.info("%s: units aligned by ID; %d units in the session, %d-%d present per trial (absent units = silent, zero rows)",
+                     sess, align_info["units_union"], align_info["units_per_trial_min"], align_info["units_per_trial_max"])
         ctx: dict[str, np.ndarray | None] = {r: None for r in REGIONS}
         tgt: dict[str, np.ndarray | None] = {r: None for r in REGIONS}
         uids: dict[str, np.ndarray | None] = {r: None for r in REGIONS}
@@ -186,7 +233,7 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
         for rec in tqdm(recs, desc=f"binning {sess}", leave=False):
             keep, reason = _csv_flags(rec, cfg)
             try:
-                tr = load_trial_rasters(rec.npz_path, cfg, metadata=rec.csv)
+                tr = load_trial_rasters(rec.npz_path, cfg, metadata=rec.csv, unit_index=unit_index)
             except Exception as e:  # corrupted / incomplete NPZ
                 reason = f"load_error:{e}"
                 qc_rows.append({"session": sess, "trial": rec.trial, "label": rec.label, "kept": False, "reason": reason})
@@ -196,13 +243,13 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
             if keep and abs(delay_len_s * 1000.0 - delay_ms) > max_dev_ms:
                 keep, reason = False, f"delay_len_{delay_len_s:.2f}s"
             if keep and cfg.data.qc.drop_early_lick and tr.qc["early_lick"]:
-                keep, reason = False, "npz_early_lick"
-            implied = label_from_licks(tr.qc)
+                keep, reason = False, f"early_lick_{tr.qc.get('lick_source', 'npz')}"
+            implied = label_from_licks(tr.qc)   # None = no lick record anywhere (nothing to check the folder against)
+            if keep and cfg.data.qc.drop_label_mismatch and implied == "Both":
+                keep, reason = False, "licked_both_sides"
             if keep and cfg.data.qc.drop_label_mismatch and implied is not None and implied != rec.label:
                 keep, reason = False, f"label_mismatch(folder={rec.label},licks={implied})"
-            if keep and implied is None and cfg.data.qc.drop_label_mismatch:
-                keep, reason = False, "licked_both_sides"
-            if keep and n_kept > 0:
+            if keep and unit_index is None and n_kept > 0:
                 # Unit identity is positional inside a session: a trial with a different unit count in any
                 # region cannot be aligned to the tensors already filled, so it is dropped (not the session).
                 for r in REGIONS:
@@ -212,7 +259,9 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
                         log.warning("%s trial %s: %s (trial dropped)", sess, rec.trial, reason)
                         break
             qc_rows.append({"session": sess, "trial": rec.trial, "label": rec.label, "kept": keep, "reason": reason,
-                            "n_unknown_region": tr.qc["n_unknown_region"], "delay_len_s": delay_len_s})
+                            "n_unknown_region": tr.qc["n_unknown_region"], "delay_len_s": delay_len_s,
+                            "lick_source": tr.qc.get("lick_source", ""), "lick_label": implied or "",
+                            "csv_outcome": str(rec.csv.get("outcome", "")) if rec.csv else ""})
             if not keep:
                 key = reason.split(":")[0].split("(")[0]
                 key = "delay_len" if key.startswith("delay_len_") else key
@@ -249,10 +298,17 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
             trials.append(rec.trial)
             meta.append({"trial": rec.trial, "label": rec.label, "npz_path": str(rec.npz_path),
                          "video_path": str(rec.video_path) if rec.video_path else "",
-                         "first_lick_s": _first_lick(tr), **{f"ep_{k}": v for k, v in tr.epochs.items()}})
+                         "first_lick_s": _first_lick(tr), "lick_source": tr.qc.get("lick_source", ""),
+                         "csv_outcome": str(rec.csv.get("outcome", "")) if rec.csv else "",
+                         "csv_instruction": str(rec.csv.get("trial_instruction", "")) if rec.csv else "",
+                         **{f"ep_{k}": v for k, v in tr.epochs.items()}})
         if not labels:
-            log.warning("session %s has no trials after QC", sess)
+            log.warning("session %s has no trials after QC (%s)", sess,
+                        ", ".join(f"{k}: {v}" for k, v in sorted(drop_reasons.items(), key=lambda kv: -kv[1])) or "no trials discovered")
             continue
+        if n_kept < 0.5 * len(recs):
+            log.warning("session %s: only %d of %d discovered trials survive QC (%s)", sess, n_kept, len(recs),
+                        ", ".join(f"{k}: {v}" for k, v in sorted(drop_reasons.items(), key=lambda kv: -kv[1])))
         if len_fix["context"] or len_fix["target"]:
             log.info("%s: raster length fixed for %d context / %d target trial(s) (max |delta| %d / %d bins)", sess,
                      len_fix["context"], len_fix["target"], len_fix["context_max_abs_bins"], len_fix["target_max_abs_bins"])
@@ -265,7 +321,8 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
             bin_ms=cfg.data.bin_ms, target_bin_ms=cfg.data.target_bin_ms,
             qc_info={"length_fixes": len_fix, "n_discovered": len(recs), "n_kept": n_kept,
                      "n_dropped": len(recs) - n_kept, "drop_reasons": drop_reasons,
-                     "delay_ms": delay_ms, "max_delay_dev_ms": max_dev_ms},
+                     "delay_ms": delay_ms, "max_delay_dev_ms": max_dev_ms, **align_info,
+                     "lick_sources": {k: int(v) for k, v in pd.Series([m["lick_source"] for m in meta]).value_counts().items()}},
         )
         sc.save(out_path)
         caches.append(sc)
@@ -299,15 +356,17 @@ def _first_lick(tr) -> float:
     return float(licks.min() - go) if licks.size else float("nan")
 
 
-def find_duplicate_sessions(caches: list[SessionCache], tol_s: float = 0.002, min_overlap: float = 0.9) -> pd.DataFrame:
+def find_duplicate_sessions(caches: list[SessionCache], tol_s: float = 0.002, min_overlap: float = 0.9, keep: str = "B") -> pd.DataFrame:
     """Sessions that appear in both ``Data`` (dataset A) and ``Data2`` (dataset B).
 
     The two on-disk trees were extracted from the same NWB recordings, so a session can be present twice.
     Two sessions are the same recording when their trials' absolute delay-onset timestamps coincide (within
     ``tol_s``) for at least ``min_overlap`` of the trials of the smaller session - a fingerprint that cannot
     match by chance. Training on both copies would leak trials between the training and test sets, and
-    "cross-dataset transfer" would be tested on the training recordings, so ``load_cache`` drops the copy
-    without the audited behavioural log (the ``Data`` copy) unless ``data.drop_duplicate_sessions`` is false.
+    "cross-dataset transfer" would be tested on the training recordings, so ``load_cache`` drops one copy
+    (``keep`` = ``data.duplicate_keep``: ``B`` keeps the Data2 copy with the audited behavioural log, ``A`` the
+    Data copy) unless ``data.drop_duplicate_sessions`` is false.  The table lists the unit counts of both copies
+    because the two exports curate units differently.
     """
     rows = []
     a_caches = [c for c in caches if c.dataset == "A"]
@@ -327,8 +386,9 @@ def find_duplicate_sessions(caches: list[SessionCache], tol_s: float = 0.002, mi
             overlap = float((near <= tol_s).mean())
             if overlap >= min_overlap:
                 rows.append({"session_a": a.session, "session_b": b.session, "n_trials_a": a.n_trials, "n_trials_b": b.n_trials,
-                             "overlap": overlap, "dropped": a.session})
-    return pd.DataFrame(rows, columns=["session_a", "session_b", "n_trials_a", "n_trials_b", "overlap", "dropped"])
+                             "units_a": int(sum(a.n_units.values())), "units_b": int(sum(b.n_units.values())),
+                             "overlap": overlap, "dropped": b.session if keep == "A" else a.session})
+    return pd.DataFrame(rows, columns=["session_a", "session_b", "n_trials_a", "n_trials_b", "units_a", "units_b", "overlap", "dropped"])
 
 
 def _delay_onsets(c: SessionCache) -> np.ndarray:
@@ -339,15 +399,15 @@ def _delay_onsets(c: SessionCache) -> np.ndarray:
 
 
 def drop_duplicate_sessions(caches: list[SessionCache], cfg, report_path: Path | None = None) -> list[SessionCache]:
-    dup = find_duplicate_sessions(caches)
+    dup = find_duplicate_sessions(caches, keep=str(cfg.data.get_path("duplicate_keep", "B")).upper())
     if report_path is not None:
         report_path.parent.mkdir(parents=True, exist_ok=True)
         dup.to_csv(report_path, index=False)
     if not len(dup):
         return caches
     for _, r in dup.iterrows():
-        log.warning("%s is the same recording as %s (%.0f%% of delay onsets coincide); dropping the Data copy",
-                    r.session_a, r.session_b, 100 * r.overlap)
+        log.warning("%s is the same recording as %s (%.0f%% of delay onsets coincide; %d vs %d units); dropping %s",
+                    r.session_a, r.session_b, 100 * r.overlap, r.units_a, r.units_b, r.dropped)
     if not bool(cfg.data.get_path("drop_duplicate_sessions", True)):
         log.warning("data.drop_duplicate_sessions is false: keeping both copies (trials will leak between them)")
         return caches
@@ -355,11 +415,34 @@ def drop_duplicate_sessions(caches: list[SessionCache], cfg, report_path: Path |
     return [c for c in caches if c.session not in dropped]
 
 
+def drop_small_sessions(caches: list[SessionCache], cfg) -> list[SessionCache]:
+    """Sessions too small to train, select or test on are excluded from every command (with a warning).
+
+    ``data.min_trials_per_session`` (default 30) and ``data.min_trials_per_lick_class`` (default 5 Left and 5
+    Right): below that, a stratified split has no validation trials, stability subsamples have no strata and the
+    per-session statistics of the report are meaningless.  A session that drops here is almost always a loading
+    problem (see the ``drop_reasons`` of ``cache``), not a small recording.
+    """
+    min_trials = int(cfg.data.get_path("min_trials_per_session", 30))
+    min_lr = int(cfg.data.get_path("min_trials_per_lick_class", 5))
+    kept = []
+    for c in caches:
+        cc = c.class_counts()
+        if c.n_trials < min_trials or cc.get("Left", 0) < min_lr or cc.get("Right", 0) < min_lr:
+            log.warning("session %s excluded: %d trials (%s) - below data.min_trials_per_session=%d / min_trials_per_lick_class=%d; "
+                        "drop reasons at cache time: %s", c.session, c.n_trials, cc, min_trials, min_lr,
+                        c.qc_info.get("drop_reasons", {}))
+            continue
+        kept.append(c)
+    return kept
+
+
 def load_cache(cfg) -> list[SessionCache]:
     cache_dir = Path(cfg.data.cache_dir) / _cache_key(cfg)
     paths = sorted(cache_dir.glob("*.npz"))
     caches = build_cache(cfg) if not paths else [SessionCache.load(p) for p in paths]
-    return drop_duplicate_sessions(caches, cfg, cache_dir / "duplicate_sessions.csv")
+    caches = drop_duplicate_sessions(caches, cfg, cache_dir / "duplicate_sessions.csv")
+    return drop_small_sessions(caches, cfg)
 
 
 def cache_summary(caches: list[SessionCache]) -> pd.DataFrame:
@@ -370,5 +453,13 @@ def cache_summary(caches: list[SessionCache]) -> pd.DataFrame:
         row["T_ctx"] = c.context[REGIONS[0]].shape[2]
         row["T_tgt"] = c.target[REGIONS[0]].shape[2]
         row["MB"] = round(c.nbytes() / 1e6, 1)
+        qi = c.qc_info or {}
+        row["discovered"] = int(qi.get("n_discovered", c.n_trials))
+        row["dropped"] = int(qi.get("n_dropped", 0))
+        reasons = qi.get("drop_reasons", {}) or {}
+        row["drop_reasons"] = ", ".join(f"{k}:{v}" for k, v in sorted(reasons.items(), key=lambda kv: -kv[1])) or "-"
+        row["align"] = str(qi.get("unit_alignment", "?"))
+        srcs = qi.get("lick_sources", {}) or {}
+        row["licks"] = "/".join(f"{k}:{v}" for k, v in srcs.items()) or "?"
         rows.append(row)
     return pd.DataFrame(rows)

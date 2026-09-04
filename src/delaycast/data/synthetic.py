@@ -120,6 +120,21 @@ def _make_trial(rng, units: dict[str, dict], cls: str, t_start: float):
     return payload, trial_stop
 
 
+def _as_data2_export(payload: dict) -> dict:
+    """Mimic the real Data2 NPZ export: no lick arrays (they live in the behavioural log) and only the units that
+    fired at least once in the trial (silent units are absent, so unit counts vary from trial to trial and rows
+    must be aligned by ``unit_ids``)."""
+    active = np.array([len(s) > 0 for s in payload["spike_times"]])
+    out = {k: v for k, v in payload.items() if k not in ("left_lick_times", "right_lick_times")}
+    out["unit_ids"] = payload["unit_ids"][active]
+    out["brain_region"] = payload["brain_region"][active]
+    spikes = np.empty(int(active.sum()), dtype=object)
+    for j, s in enumerate([s for s, a in zip(payload["spike_times"], active) if a]):
+        spikes[j] = s
+    out["spike_times"] = spikes
+    return out
+
+
 def _csv_row(session_dir: str, subject: str, trial: int, payload: dict, cls: str) -> dict:
     fmt = lambda a: ", ".join(f"{x:.4f}" for x in a) if len(a) else ""
     return {
@@ -179,7 +194,7 @@ def make_synthetic(root: str | Path, n_sessions_a=2, n_sessions_b=2, trials_per_
             payload, t_stop = _make_trial(rng, units, cls, t)
             d = sess / "NPZ" / cls
             d.mkdir(parents=True, exist_ok=True)
-            np.savez(d / f"trial{i}.npz", **payload)
+            np.savez(d / f"trial{i}.npz", **_as_data2_export(payload))
             rows.append(_csv_row(sess_dir, subject, i, payload, cls))
             t = t_stop + rng.uniform(1.5, 3.0)
         df = pd.DataFrame(rows)

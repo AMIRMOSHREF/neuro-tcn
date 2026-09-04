@@ -50,9 +50,18 @@ python -m delaycast all --quick                   # sanity run, then: python -m 
 `scripts\run_delaycast.ps1` runs the whole protocol step by step (`-Quick` for the sanity run). Outputs go to
 `outputs\delaycast\` and the binned cache to `cache\` inside the folder you run from.
 
-`cache` also reports **duplicate recordings**: `Data/Session2-4` are the same recordings as three `Data2` sessions
-(same trials, same epoch timestamps). Only the `Data2` copy is used afterwards (`data.drop_duplicate_sessions`), so
-the real corpus is `Data/Session1` plus the 10 `Data2` sessions.
+`cache` prints, per session, how many trials were discovered, kept and dropped (with the reasons), how lick times were
+obtained (`Data`: NPZ arrays; `Data2`: the audited log — its NPZs have none) and how units were aligned (`Data2` NPZs
+list only the units that fired in the trial, so rows are aligned by `unit_ids`). It also reports **duplicate
+recordings**: `Data/Session2-4` are the same recordings as three `Data2` sessions (same trials, same epoch
+timestamps). Only one copy is used afterwards (`data.duplicate_keep`, default the `Data2` copy), so the real corpus is
+`Data/Session1` plus the 10 `Data2` sessions. Sessions that lose most of their trials in QC, or end with fewer than
+30 trials / 5 Left / 5 Right, are excluded from every command with a warning — that is a loading problem to fix, not
+a small recording. After pulling a loader change, delete stale runs before re-running the protocol:
+
+```powershell
+Remove-Item -Recurse -Force outputs\delaycast\runs, cache\selection   # the binned cache rebuilds itself (versioned key)
+```
 
 ## Commands (real data)
 

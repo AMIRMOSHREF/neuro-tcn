@@ -86,25 +86,62 @@ def cmd_inspect(cfg: Config, args) -> None:
             print("\nWARNING: identical trial and class counts in both trees (probably the same recordings; `cache` verifies and drops the Data copy):")
             print(hits[["session_a", "session_b"] + key].to_string(index=False))
     if recs and args.npz_detail:
-        data = np.load(recs[0].npz_path, allow_pickle=True)
-        print(f"\nFirst NPZ: {recs[0].npz_path}")
-        for k in data.files:
-            arr = data[k]
-            print(f"  {k:24s} shape={arr.shape} dtype={arr.dtype}")
-        # Route through the same schema reader the cache uses, so what is printed is what gets binned
-        # (both NPZ schemas, ragged / NaN-padded / single-unit spike containers).
-        from .data.rasters import normalize_region, spikes_by_region
+        for ds in ("A", "B"):
+            first = [r for r in recs if r.dataset == ds]
+            if first:
+                _npz_detail(first)
+
+
+def _npz_detail(recs) -> None:
+    """Keys, schema, lick record and unit-identity consistency of one dataset (first session, first trials)."""
+    from .data.rasters import normalize_region, spikes_by_region, unit_ids_by_region
+    rec = recs[0]
+    data = np.load(rec.npz_path, allow_pickle=True)
+    print(f"\nDataset {rec.dataset} - first NPZ: {rec.npz_path}")
+    for k in data.files:
+        arr = data[k]
+        print(f"  {k:24s} shape={arr.shape} dtype={arr.dtype}")
+    # Route through the same schema reader the cache uses, so what is printed is what gets binned
+    # (both NPZ schemas, ragged / NaN-padded / single-unit spike containers).
+    try:
+        by_region = spikes_by_region(data)
+    except (KeyError, ValueError) as e:
+        print(f"  regions: unreadable ({e})")
+    else:
+        print("  regions:", {r: len(units) for r, (units, _) in by_region.items()})
+        print("  spikes: ", {r: int(sum(len(u) for u in units)) for r, (units, _) in by_region.items()})
+    if "brain_region" in data.files:
+        unknown = [r for r in np.asarray(data["brain_region"]).astype(str).ravel() if normalize_region(r) is None]
+        if unknown:
+            print(f"  unknown region labels ({len(unknown)} units): {sorted(set(unknown))}")
+    npz_licks = [k for k in ("left_lick_times", "right_lick_times") if k in data.files]
+    csv_licks = [k for k in ("left_lick_times", "right_lick_times") if rec.csv and k in rec.csv]
+    print(f"  lick record: NPZ keys {npz_licks or 'none'}; behavioural-log columns {csv_licks or 'none'}"
+          + ("" if npz_licks or csv_licks else "  <- folder labels cannot be verified against licks"))
+    # Unit identity across the first trials of the session: constant count (positional identity is fine) or
+    # varying (the export keeps only units with spikes in the trial -> the cache aligns rows by unit ID).
+    same = [r for r in recs if r.session == rec.session][:8]
+    counts, ids_ok = [], True
+    for r in same:
         try:
-            by_region = spikes_by_region(data)
-        except (KeyError, ValueError) as e:
-            print(f"  regions: unreadable ({e})")
+            ids = unit_ids_by_region(r.npz_path)
+        except Exception:
+            continue
+        if ids is None:
+            ids_ok = False
+            d2 = np.load(r.npz_path, allow_pickle=True)
+            try:
+                counts.append(sum(len(u) for u, _ in spikes_by_region(d2).values()))
+            except (KeyError, ValueError):
+                pass
         else:
-            print("  regions:", {r: len(units) for r, (units, _) in by_region.items()})
-            print("  spikes: ", {r: int(sum(len(u) for u in units)) for r, (units, _) in by_region.items()})
-        if "brain_region" in data.files:
-            unknown = [r for r in np.asarray(data["brain_region"]).astype(str).ravel() if normalize_region(r) is None]
-            if unknown:
-                print(f"  unknown region labels ({len(unknown)} units): {sorted(set(unknown))}")
+            counts.append(int(sum(len(v) for v in ids.values())))
+    if counts:
+        varies = len(set(counts)) > 1
+        print(f"  units in the first {len(counts)} trials of {rec.session}: {counts} -> "
+              + ("count varies per trial; " + ("rows are aligned by unit ID (absent units = zero rows)" if ids_ok
+                 else "NO unit IDs available: only the first trial's unit count can be used (others are dropped)") if varies
+                 else "constant"))
 
 
 def cmd_cache(cfg: Config, args) -> None:
@@ -115,10 +152,18 @@ def cmd_cache(cfg: Config, args) -> None:
     print(summ.to_string(index=False))
     if "MB" in summ:
         print(f"total in RAM: {summ.MB.sum():.0f} MB (uint8 counts)")
-    dup = find_duplicate_sessions(caches)
+    min_trials = int(cfg.data.get_path("min_trials_per_session", 30))
+    min_lr = int(cfg.data.get_path("min_trials_per_lick_class", 5))
+    bad = summ[(summ.dropped > 0.5 * summ.discovered) | (summ.n_trials < min_trials) | (summ.Left < min_lr) | (summ.Right < min_lr)]
+    if len(bad):
+        print(f"\nWARNING: {len(bad)} session(s) lost most of their trials in QC or are below the minimum "
+              f"({min_trials} trials, {min_lr} Left and {min_lr} Right) and will be EXCLUDED from every later command:")
+        print(bad[["session", "discovered", "n_trials", "Ignore", "Left", "Right", "drop_reasons", "licks"]].to_string(index=False))
+        print(f"per-trial reasons: {Path(cfg.data.cache_dir) / _cache_key(cfg) / 'qc_log.csv'}")
+    dup = find_duplicate_sessions(caches, keep=str(cfg.data.get_path("duplicate_keep", "B")).upper())
     dup.to_csv(Path(cfg.data.cache_dir) / _cache_key(cfg) / "duplicate_sessions.csv", index=False)
     if len(dup):
-        print("\nDUPLICATE RECORDINGS (same trials in Data and Data2; the Data copy is dropped by every later command):")
+        print("\nDUPLICATE RECORDINGS (same trials in Data and Data2; the `dropped` copy is ignored by every later command):")
         print(dup.to_string(index=False))
     else:
         print("\nno session appears in both Data and Data2")
@@ -142,6 +187,14 @@ def cmd_select(cfg: Config, args) -> None:
     pd.concat([r.funnel for r in results]).to_csv(out / "funnel.csv", index=False)
     pd.set_option("display.width", 250)
     print(summ.to_string(index=False))
+    empty = summ[summ.n_selected == 0]
+    if len(empty):
+        cols = [c for c in ("session", "n_trials_used", "n_eligible", "max_stability_eligible", "n_eligible_stab_ge_0.5", "n_eligible_stab_ge_0.4") if c in summ]
+        print(f"\nNOTE: {len(empty)} session(s) select no unit: eligible units exist but none is re-selected in "
+              f">= {float(cfg.selection.get_path('min_stability', 0.6)):.0%} of the half-subsamples (small sessions).  "
+              "They stay in the corpus with an empty criteria set (reported as such); "
+              "`--set selection.min_stability=0.5` relaxes the threshold for every session.")
+        print(empty[cols].to_string(index=False))
     print(f"\nper-unit tables with reasons written to {out}/ (descriptive: all trials; training runs re-select on their fit trials)")
 
 

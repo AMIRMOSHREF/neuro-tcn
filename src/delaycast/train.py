@@ -30,7 +30,7 @@ from .config import Config, dump_config
 from .data.cache import SessionCache, load_cache
 from .data.dataset import (SessionBatchSampler, SessionTensors, TrialDataset, build_session_tensors, class_weights,
                            collate, stratified_split, tensors_from_indices)
-from .features.selection import SelectionResult, _features_key, select_neurons
+from .features.selection import LEFT, RIGHT, SelectionResult, _features_key, select_neurons
 from .models.delaycast_net import DelayCASTNet, poisson_nll
 
 log = logging.getLogger(__name__)
@@ -299,6 +299,27 @@ def fit(model: DelayCASTNet, train_ds: TrialDataset, val_ds: TrialDataset, cfg: 
     return pd.DataFrame(history)
 
 
+def _check_training_set(train_ds: TrialDataset, val_ds: TrialDataset, splits: dict, held: list[str]) -> None:
+    """Refuse to train on a degenerate corpus instead of producing a NaN validation curve.
+
+    This is reached when the loader kept (almost) no trials of the training sessions - e.g. every Data2 trial
+    failed QC - and it is far cheaper to stop here than to discover it in ``REPORT.md``."""
+    n_train, n_val = len(train_ds), len(val_ds)
+    train_sessions = [s for s, v in splits.items() if len(v["train"])]
+    y = np.asarray(train_ds.labels()) if n_train else np.zeros(0, int)
+    n_classes = len(np.unique(y))
+    if n_train < 20 or n_classes < 2 or n_val == 0:
+        raise RuntimeError(
+            f"training set is degenerate: {n_train} training trials over {len(train_sessions)} session(s) "
+            f"({n_classes} class(es)), {n_val} validation trials; held-out sessions: {held or 'none'}. "
+            "Check `python -m delaycast cache` (columns discovered / dropped / drop_reasons): the training sessions "
+            "were almost entirely removed by QC or by data.min_trials_per_session.")
+    per_class = np.bincount(y, minlength=len(CLASSES))
+    if per_class[LEFT] < 5 or per_class[RIGHT] < 5:
+        raise RuntimeError(f"training set has too few lick trials: Left {per_class[LEFT]}, Right {per_class[RIGHT]} "
+                           f"over {len(train_sessions)} session(s); see `python -m delaycast cache` drop reasons.")
+
+
 def build_model(cfg: Config, tensors: list[SessionTensors], device) -> DelayCASTNet:
     t_ctx = tensors[0].x[REGIONS[0]].shape[2]
     t_tgt = tensors[0].y[REGIONS[0]].shape[2]
@@ -368,6 +389,7 @@ def run_training(cfg: Config, mode: str = "criteria", out_dir: Path | None = Non
 
     train_ds = TrialDataset(tensors, {s: v["train"] for s, v in splits.items() if len(v["train"])})
     val_ds = TrialDataset(tensors, {s: v["val"] for s, v in splits.items() if len(v["val"])})
+    _check_training_set(train_ds, val_ds, splits, held=_as_list(holdout))
     model = build_model(cfg, tensors, device)
     log.info("model parameters: %.2fM (receptive field %d bins, %d transformer blocks, spectral branch: %s)",
              sum(p.numel() for p in model.parameters()) / 1e6, model.tcn.receptive_field, len(model.temporal_attn), model.spectral_branch)
