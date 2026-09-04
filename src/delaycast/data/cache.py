@@ -157,11 +157,13 @@ def _unit_universe(recs: list[TrialRecord]) -> tuple[dict[str, np.ndarray] | Non
     per_trial = []
     for rec in recs:
         try:
-            ids = unit_ids_by_region(rec.npz_path)
+            ids, note = unit_ids_by_region(rec.npz_path)
         except Exception:  # unreadable file: reported again (with the reason) by the binning pass
             continue
         if ids is None:
-            return None, {"unit_alignment": "positional"}
+            log.warning("%s: units cannot be aligned by ID (%s in %s); using position, trials whose unit count "
+                        "differs from the first kept trial will be dropped", recs[0].session, note, rec.npz_path.name)
+            return None, {"unit_alignment": "positional", "unit_alignment_note": note}
         n_tr = 0
         for r in REGIONS:
             for u in np.asarray(ids[r]).ravel().tolist():
@@ -172,10 +174,10 @@ def _unit_universe(recs: list[TrialRecord]) -> tuple[dict[str, np.ndarray] | Non
             n_tr += len(ids[r])
         per_trial.append(n_tr)
     if not per_trial:
-        return None, {"unit_alignment": "positional"}
+        return None, {"unit_alignment": "positional", "unit_alignment_note": "no readable NPZ"}
     out = {r: np.asarray(universe[r]) for r in REGIONS}
     n_union = int(sum(len(v) for v in out.values()))
-    info = {"unit_alignment": "id", "units_union": n_union, "units_per_trial_median": float(np.median(per_trial)),
+    info = {"unit_alignment": "id", "unit_alignment_note": "ok", "units_union": n_union, "units_per_trial_median": float(np.median(per_trial)),
             "units_per_trial_min": int(np.min(per_trial)), "units_per_trial_max": int(np.max(per_trial)),
             "unit_presence_median": {r: (float(np.median(list(presence[r].values())) / len(recs)) if presence[r] else np.nan) for r in REGIONS}}
     return out, info
@@ -230,6 +232,8 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
         n_kept = 0
         len_fix = {"context": 0, "target": 0, "context_max_abs_bins": 0, "target_max_abs_bins": 0}
         drop_reasons: dict[str, int] = {}
+        lick_sources: dict[str, int] = {}
+        lick_labels: dict[str, int] = {}
         for rec in tqdm(recs, desc=f"binning {sess}", leave=False):
             keep, reason = _csv_flags(rec, cfg)
             try:
@@ -245,6 +249,8 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
             if keep and cfg.data.qc.drop_early_lick and tr.qc["early_lick"]:
                 keep, reason = False, f"early_lick_{tr.qc.get('lick_source', 'npz')}"
             implied = label_from_licks(tr.qc)   # None = no lick record anywhere (nothing to check the folder against)
+            lick_sources[tr.qc.get("lick_source", "?")] = lick_sources.get(tr.qc.get("lick_source", "?"), 0) + 1
+            lick_labels[implied or "unknown"] = lick_labels.get(implied or "unknown", 0) + 1
             if keep and cfg.data.qc.drop_label_mismatch and implied == "Both":
                 keep, reason = False, "licked_both_sides"
             if keep and cfg.data.qc.drop_label_mismatch and implied is not None and implied != rec.label:
@@ -307,8 +313,8 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
                         ", ".join(f"{k}: {v}" for k, v in sorted(drop_reasons.items(), key=lambda kv: -kv[1])) or "no trials discovered")
             continue
         if n_kept < 0.5 * len(recs):
-            log.warning("session %s: only %d of %d discovered trials survive QC (%s)", sess, n_kept, len(recs),
-                        ", ".join(f"{k}: {v}" for k, v in sorted(drop_reasons.items(), key=lambda kv: -kv[1])))
+            log.warning("session %s: only %d of %d discovered trials survive QC (%s); lick record %s implies %s", sess, n_kept, len(recs),
+                        ", ".join(f"{k}: {v}" for k, v in sorted(drop_reasons.items(), key=lambda kv: -kv[1])), lick_sources, lick_labels)
         if len_fix["context"] or len_fix["target"]:
             log.info("%s: raster length fixed for %d context / %d target trial(s) (max |delta| %d / %d bins)", sess,
                      len_fix["context"], len_fix["target"], len_fix["context_max_abs_bins"], len_fix["target_max_abs_bins"])
@@ -322,7 +328,7 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
             qc_info={"length_fixes": len_fix, "n_discovered": len(recs), "n_kept": n_kept,
                      "n_dropped": len(recs) - n_kept, "drop_reasons": drop_reasons,
                      "delay_ms": delay_ms, "max_delay_dev_ms": max_dev_ms, **align_info,
-                     "lick_sources": {k: int(v) for k, v in pd.Series([m["lick_source"] for m in meta]).value_counts().items()}},
+                     "lick_sources": lick_sources, "lick_labels": lick_labels},
         )
         sc.save(out_path)
         caches.append(sc)
@@ -461,5 +467,7 @@ def cache_summary(caches: list[SessionCache]) -> pd.DataFrame:
         row["align"] = str(qi.get("unit_alignment", "?"))
         srcs = qi.get("lick_sources", {}) or {}
         row["licks"] = "/".join(f"{k}:{v}" for k, v in srcs.items()) or "?"
+        labs = qi.get("lick_labels", {}) or {}
+        row["lick_labels"] = "/".join(f"{k[0]}:{v}" for k, v in labs.items()) or "?"
         rows.append(row)
     return pd.DataFrame(rows)

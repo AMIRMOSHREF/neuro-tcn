@@ -141,22 +141,31 @@ def parse_time_list(value) -> np.ndarray:
     return np.asarray(out, dtype=float) if out else _EMPTY
 
 
-def unit_ids_by_region(npz_path) -> dict[str, np.ndarray] | None:
+def unit_ids_by_region(npz_path) -> tuple[dict[str, np.ndarray] | None, str]:
     """Unit IDs per canonical region of one combined-schema NPZ, reading only the two small arrays.
 
     ``np.load`` of an NPZ is lazy per member, so this never decompresses ``spike_times``; it is what the cache
-    builder uses in its first pass to learn the unit universe of a session.  Returns ``None`` for the pre-split
-    schema (no IDs) or when the IDs of a trial are not unique (then position is the only usable identity).
+    builder uses in its first pass to learn the unit universe of a session.  Returns ``(ids, "ok")`` or
+    ``(None, why)`` when the file offers no usable identity: pre-split schema (no IDs), ``unit_ids`` and
+    ``brain_region`` of different length, or an ID that occurs twice *within one region* (IDs only have to be
+    unique per region - probe-local cluster numbers that repeat across hemispheres are fine).
     """
     data = np.load(npz_path, allow_pickle=True)
-    if "brain_region" not in data.files or "unit_ids" not in data.files:
-        return None
+    for key in ("brain_region", "unit_ids"):
+        if key not in data.files:
+            return None, f"no {key} key"
     regions_raw = np.asarray(data["brain_region"]).astype(str).ravel()
     ids = np.asarray(data["unit_ids"]).ravel()
-    if ids.size != regions_raw.size or len(np.unique(ids)) != ids.size:
-        return None
+    if ids.size != regions_raw.size:
+        return None, f"unit_ids has {ids.size} entries but brain_region {regions_raw.size}"
     canon = np.array([normalize_region(region) or "unknown" for region in regions_raw])
-    return {r: ids[canon == r] for r in REGIONS}
+    out = {}
+    for r in REGIONS:
+        rid = ids[canon == r]
+        if len(np.unique(rid)) != rid.size:
+            return None, f"duplicate unit_ids within {r} ({rid.size - len(np.unique(rid))} repeats)"
+        out[r] = rid
+    return out, "ok"
 
 
 @dataclass
@@ -404,15 +413,24 @@ def load_trial_rasters(npz_path, cfg, metadata: dict | None = None,
         target[r] = tg
         uids[r] = region_ids
 
+    # Lick record priority: NPZ arrays that actually contain licks > the behavioural-log row (which the audit
+    # used to define the class) > NPZ arrays that exist but are empty > nothing.  The Data2 export writes the
+    # lick keys into every NPZ but leaves them empty on almost every lick trial, so "key present" is not
+    # evidence of "no lick"; the log row is authoritative there.
     has_npz_licks = "left_lick_times" in data.files or "right_lick_times" in data.files
     lick_left = _times(data, "left_lick_times")
     lick_right = _times(data, "right_lick_times")
-    lick_source = "npz" if has_npz_licks else "none"
     has_csv_licks = bool(metadata) and any(k in metadata for k in ("left_lick_times", "right_lick_times"))
-    if not has_npz_licks and has_csv_licks:
+    if lick_left.size + lick_right.size > 0:
+        lick_source = "npz"
+    elif has_csv_licks:
         lick_left = parse_time_list(metadata.get("left_lick_times"))
         lick_right = parse_time_list(metadata.get("right_lick_times"))
         lick_source = "csv"
+    elif has_npz_licks:
+        lick_source = "npz"
+    else:
+        lick_source = "none"
     qc = {
         "n_unknown_region": int(n_unknown_region),
         "early_lick": bool(np.any(np.concatenate([lick_left, lick_right]) < go_start)) if (lick_left.size + lick_right.size) else False,

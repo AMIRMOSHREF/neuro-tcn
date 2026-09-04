@@ -118,17 +118,34 @@ def _npz_detail(recs) -> None:
     csv_licks = [k for k in ("left_lick_times", "right_lick_times") if rec.csv and k in rec.csv]
     print(f"  lick record: NPZ keys {npz_licks or 'none'}; behavioural-log columns {csv_licks or 'none'}"
           + ("" if npz_licks or csv_licks else "  <- folder labels cannot be verified against licks"))
+    if "unit_ids" in data.files:
+        ids = np.asarray(data["unit_ids"]).ravel()
+        print(f"  unit_ids: {ids.size} entries, {len(np.unique(ids))} unique, range {ids.min() if ids.size else '-'}..{ids.max() if ids.size else '-'}")
+    # The first Left trial with its lick evidence from both sources, plus the epoch scalars the licks are compared
+    # against: this is where an empty NPZ lick array, a relative time base or a swapped side shows up.
+    left = next((r for r in recs if r.session == rec.session and r.label == "Left"), None)
+    if left is not None:
+        d_left = np.load(left.npz_path, allow_pickle=True)
+        from .data.rasters import _times, parse_time_list, read_epochs
+        ep = read_epochs(d_left, left.csv)
+        fmt = lambda a: np.round(np.asarray(a, float)[:4], 3).tolist()
+        print(f"  first Left trial ({left.npz_path.name}): delay_start {ep['delay_start_times']:.3f}, go_start {ep['go_start_times']:.3f}")
+        print(f"    NPZ  left_lick_times {fmt(_times(d_left, 'left_lick_times'))} right_lick_times {fmt(_times(d_left, 'right_lick_times'))}")
+        if left.csv:
+            print(f"    log  left_lick_times {fmt(parse_time_list(left.csv.get('left_lick_times')))} right_lick_times "
+                  f"{fmt(parse_time_list(left.csv.get('right_lick_times')))} outcome={left.csv.get('outcome')} "
+                  f"instruction={left.csv.get('trial_instruction')} early_lick={left.csv.get('early_lick')}")
     # Unit identity across the first trials of the session: constant count (positional identity is fine) or
     # varying (the export keeps only units with spikes in the trial -> the cache aligns rows by unit ID).
     same = [r for r in recs if r.session == rec.session][:8]
-    counts, ids_ok = [], True
+    counts, notes = [], set()
     for r in same:
         try:
-            ids = unit_ids_by_region(r.npz_path)
+            ids, note = unit_ids_by_region(r.npz_path)
         except Exception:
             continue
+        notes.add(note)
         if ids is None:
-            ids_ok = False
             d2 = np.load(r.npz_path, allow_pickle=True)
             try:
                 counts.append(sum(len(u) for u, _ in spikes_by_region(d2).values()))
@@ -138,10 +155,11 @@ def _npz_detail(recs) -> None:
             counts.append(int(sum(len(v) for v in ids.values())))
     if counts:
         varies = len(set(counts)) > 1
+        ids_ok = notes == {"ok"}
         print(f"  units in the first {len(counts)} trials of {rec.session}: {counts} -> "
               + ("count varies per trial; " + ("rows are aligned by unit ID (absent units = zero rows)" if ids_ok
-                 else "NO unit IDs available: only the first trial's unit count can be used (others are dropped)") if varies
-                 else "constant"))
+                 else f"units CANNOT be aligned by ID ({', '.join(sorted(notes - {'ok'}))}): only trials with the first trial's unit count are kept") if varies
+                 else "constant" + ("" if ids_ok else f" (no ID alignment: {', '.join(sorted(notes - {'ok'}))})")))
 
 
 def cmd_cache(cfg: Config, args) -> None:
@@ -158,7 +176,8 @@ def cmd_cache(cfg: Config, args) -> None:
     if len(bad):
         print(f"\nWARNING: {len(bad)} session(s) lost most of their trials in QC or are below the minimum "
               f"({min_trials} trials, {min_lr} Left and {min_lr} Right) and will be EXCLUDED from every later command:")
-        print(bad[["session", "discovered", "n_trials", "Ignore", "Left", "Right", "drop_reasons", "licks"]].to_string(index=False))
+        print(bad[["session", "discovered", "n_trials", "Ignore", "Left", "Right", "drop_reasons", "licks", "lick_labels", "align"]].to_string(index=False))
+        print("(licks = where the lick record came from; lick_labels = class implied by that record, I/L/R/B/u = Ignore/Left/Right/Both/unknown)")
         print(f"per-trial reasons: {Path(cfg.data.cache_dir) / _cache_key(cfg) / 'qc_log.csv'}")
     dup = find_duplicate_sessions(caches, keep=str(cfg.data.get_path("duplicate_keep", "B")).upper())
     dup.to_csv(Path(cfg.data.cache_dir) / _cache_key(cfg) / "duplicate_sessions.csv", index=False)

@@ -51,7 +51,7 @@ python -m delaycast all --quick                   # sanity run, then: python -m 
 `outputs\delaycast\` and the binned cache to `cache\` inside the folder you run from.
 
 `cache` prints, per session, how many trials were discovered, kept and dropped (with the reasons), how lick times were
-obtained (`Data`: NPZ arrays; `Data2`: the audited log — its NPZs have none) and how units were aligned (`Data2` NPZs
+obtained (`Data`: NPZ arrays; `Data2`: the audited log — its NPZ lick arrays are empty on lick trials) and how units were aligned (`Data2` NPZs
 list only the units that fired in the trial, so rows are aligned by `unit_ids`). It also reports **duplicate
 recordings**: `Data/Session2-4` are the same recordings as three `Data2` sessions (same trials, same epoch
 timestamps). Only one copy is used afterwards (`data.duplicate_keep`, default the `Data2` copy), so the real corpus is

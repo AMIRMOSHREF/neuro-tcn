@@ -609,7 +609,12 @@ def test_data2_lick_times_from_csv_and_outcome_rule(tmp_path):
     }
     rows = []
     for tr, (cls, t0, row) in plan.items():
-        _write_b(tmp_path, tr, cls, _strip_licks(_payload(rng, n_units, cls, t0=t0)))
+        payload = _payload(rng, n_units, cls, t0=t0)
+        if tr == 1:   # the real Data2 export: lick keys present but EMPTY on a lick trial -> the log row wins
+            payload["left_lick_times"], payload["right_lick_times"] = np.empty(0), np.empty(0)
+        else:
+            payload = _strip_licks(payload)
+        _write_b(tmp_path, tr, cls, payload)
         if row is not None:
             rows.append({"trial": tr, "trial_instruction": "left" if cls == "Left" else "right", **row})
     _write_b_csv(tmp_path, rows)
@@ -619,7 +624,9 @@ def test_data2_lick_times_from_csv_and_outcome_rule(tmp_path):
     assert c.trials.tolist() == [1, 5, 6, 8] and c.labels.tolist() == [1, 2, 0, 0]
     assert c.meta.lick_source.tolist() == ["csv", "csv", "none", "csv"]
     assert c.meta.csv_outcome.tolist() == ["hit", "miss", "", "ignore"]
-    assert c.qc_info["lick_sources"] == {"csv": 3, "none": 1}
+    assert c.qc_info["lick_sources"] == {"csv": 7, "none": 1}     # all discovered trials, not only the kept ones
+    assert c.qc_info["lick_labels"] == {"Left": 1, "Right": 4, "Both": 1, "Ignore": 1, "unknown": 1}
+    assert c.qc_info["unit_alignment"] == "id" and c.qc_info["unit_alignment_note"] == "ok"
     cache_sub = next(p for p in (tmp_path / "cache").iterdir() if p.is_dir())
     qc = pd.read_csv(cache_sub / "qc_log.csv").set_index("trial")
     assert qc.loc[2, "reason"] == "csv_early_lick"
@@ -668,3 +675,39 @@ def test_small_sessions_are_excluded_and_training_set_is_checked():
         _check_training_set(TrialDataset([t_tiny], {"B/tiny": np.arange(1)}), ok_val, {"B/tiny": {"train": np.arange(1)}}, held=["A/x"])
     with pytest.raises(RuntimeError, match="degenerate"):
         _check_training_set(ok_train, TrialDataset([t_big], {}), {"B/big": {"train": np.arange(30)}}, held=[])
+
+
+def test_unit_ids_unique_per_region_not_globally(tmp_path):
+    """Probe-local cluster numbers repeat across hemispheres; alignment only needs uniqueness within a region."""
+    from delaycast.data.rasters import unit_ids_by_region
+
+    rng = np.random.default_rng(8)
+    n_units = {"ALM_L": 3, "ALM_R": 3, "STR_L": 2, "STR_R": 2}
+    p1, p2, p3 = (_payload(rng, n_units, cls, t0=10.0 * i) for i, cls in enumerate(["Left", "Right", "Left"], start=1))
+    for p in (p1, p2, p3):   # ids 0,1,2 | 0,1,2 | 0,1 | 0,1  (unique per region only)
+        p["unit_ids"] = np.array([0, 1, 2, 0, 1, 2, 0, 1, 0, 1])
+    _write_a(tmp_path, "Session1", 1, "Left", p1)
+    _write_a(tmp_path, "Session1", 2, "Right", _without_units_at(p2, [4]))     # ALM_R id 1 absent in trial 2
+    _write_a(tmp_path, "Session1", 3, "Left", p3)
+    ids, note = unit_ids_by_region(tmp_path / "Data" / "Session1" / "Rasters" / "Left" / "trial_1.npz")
+    assert note == "ok" and ids["ALM_R"].tolist() == [0, 1, 2]
+    (c,) = build_cache(_cfg(tmp_path), force=True)
+    assert c.n_trials == 3 and c.qc_info["unit_alignment"] == "id" and c.n_units["ALM_R"] == 3
+    assert not c.context["ALM_R"][1, 1].any()
+
+    # a repeat WITHIN one region is unusable -> positional alignment with a note
+    p4 = _payload(rng, n_units, "Left", t0=40.0)
+    p4["unit_ids"] = np.array([0, 0, 2, 3, 4, 5, 6, 7, 8, 9])
+    path = _write_a(tmp_path, "Session2", 1, "Left", p4)
+    ids, note = unit_ids_by_region(path)
+    assert ids is None and note.startswith("duplicate unit_ids within ALM_L")
+
+
+def _without_units_at(payload: dict, positions: list[int]) -> dict:
+    keep = np.ones(len(payload["unit_ids"]), bool)
+    keep[positions] = False
+    out = dict(payload)
+    out["unit_ids"] = np.asarray(payload["unit_ids"])[keep]
+    out["brain_region"] = np.asarray(payload["brain_region"])[keep]
+    out["spike_times"] = _object_array([s for s, k in zip(payload["spike_times"], keep) if k])
+    return out

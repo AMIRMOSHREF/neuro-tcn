@@ -35,14 +35,18 @@ the upcoming action** — and whether that answer is the same across recordings.
   `combined_audited_master_log.csv` via `session_dir`). Rows are dropped if `excluded`, early lick, photostim, auto/free
   water, or outcome not in `data.qc.csv_keep_outcomes` (default {hit, miss, ignore}: error trials are kept because
   the class is the action, not the instruction; `[hit, ignore]` gives an instruction-only analysis). The Data2 NPZs
-  carry **no lick arrays** — lick times are taken from the log row (`left_lick_times` / `right_lick_times`, string
-  lists) — and contain **only the units that fired in the trial**, so unit counts differ from trial to trial. Both NPZ
+  carry lick arrays that are **empty on almost every lick trial** — so a lick record is taken from the NPZ only
+  when it actually contains licks, and otherwise from the log row (`left_lick_times` / `right_lick_times`, string
+  lists; the record the audit used to define the class) — and they list **only the units that fired in the
+  trial**, so unit counts differ from trial to trial. Both NPZ
   schemas are read (combined `brain_region`/`spike_times`, or pre-split `left_ALM_spikes`, …; object arrays, NaN-padded
   matrices and single-unit arrays are all accepted).
 * **Unit identity**: within a session, rows are aligned by `unit_ids` — the cache builder first collects the union of
   IDs over all trials (order of first appearance), then places every trial's units by ID; a unit absent from a trial's
-  NPZ is a row of zeros (it was silent). Without IDs (pre-split schema) identity is positional and a trial whose unit
-  count differs from the session's is dropped. The cache JSON records the alignment mode and how many units each
+  NPZ is a row of zeros (it was silent). IDs only need to be unique within a region (probe-local cluster numbers that
+  repeat across hemispheres are fine). Without usable IDs (pre-split schema, an ID repeated inside one region, or
+  `unit_ids` and `brain_region` of different length) identity is positional and a trial whose unit count differs from
+  the first kept trial's is dropped; `cache` prints the reason in the `align` column. The cache JSON records the alignment mode and how many units each
   trial contributed versus the union.
 * **NPZ-level QC** (both datasets): licks before the go cue → drop; folder label contradicted by the lick record
   (NPZ arrays, else log row) or licks on both sides → drop; a trial with **no lick record anywhere** keeps its folder
