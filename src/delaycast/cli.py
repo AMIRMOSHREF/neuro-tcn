@@ -578,6 +578,8 @@ def main(argv: list[str] | None = None) -> None:
 
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+    for noisy in ("fontTools", "matplotlib", "PIL", "h5py", "hdmf", "pynwb"):   # PDF font subsetting etc. log at INFO
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     if not any(k in os.environ for k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "TORCH_NUM_THREADS")):
         try:  # use every core unless the user limited threads through the usual environment variables
             import torch
