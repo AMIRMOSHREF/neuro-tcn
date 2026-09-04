@@ -10,6 +10,7 @@ data:
   use_dataset_a: true
   use_dataset_b: true
   cache_dir: "cache"         # binned per-session tensors are stored here (safe to delete)
+  drop_duplicate_sessions: true   # a session present in both Data and Data2 (same recording) is used once (the Data2 copy)
   bin_ms: 10                 # raster bin width used for the model input (delay/context)
   target_bin_ms: 50          # bin width for the response-epoch forecasting target
   context:

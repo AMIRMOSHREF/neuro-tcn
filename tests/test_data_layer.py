@@ -517,3 +517,29 @@ def test_context_grid_is_anchored_at_go(tmp_path):
     region = [r for r in tr.context if tr.context[r].shape[0] > 0][0]
     assert tr.context[region][0, -1] == 0
     assert tr.target[region][0, 0] == 1
+
+
+def test_duplicate_sessions_are_detected_and_dropped():
+    """Two caches whose trials share absolute delay-onset timestamps are the same recording (Data vs Data2)."""
+    import numpy as np
+    import pandas as pd
+    from delaycast import REGIONS
+    from delaycast.config import load_config
+    from delaycast.data.cache import SessionCache, drop_duplicate_sessions, find_duplicate_sessions
+
+    def make(session, dataset, onsets):
+        n = len(onsets)
+        return SessionCache(session=session, dataset=dataset, subject=session,
+                            context={r: np.zeros((n, 3, 120), np.uint8) for r in REGIONS},
+                            target={r: np.zeros((n, 3, 30), np.uint8) for r in REGIONS},
+                            unit_ids={r: np.arange(3) for r in REGIONS}, labels=np.zeros(n, int), trials=np.arange(n),
+                            meta=pd.DataFrame({"ep_delay_start_times": onsets}), bin_ms=10.0, target_bin_ms=50.0)
+
+    onsets = np.cumsum(np.random.default_rng(0).uniform(6, 9, size=100)) + 12.3
+    a_dup = make("A/Session2", "A", onsets)
+    a_other = make("A/Session1", "A", onsets + 1000.0)
+    b = make("B/sub-1_ses-x", "B", onsets)
+    dup = find_duplicate_sessions([a_dup, a_other, b])
+    assert list(dup.session_a) == ["A/Session2"] and list(dup.session_b) == ["B/sub-1_ses-x"]
+    kept = drop_duplicate_sessions([a_dup, a_other, b], load_config(None))
+    assert sorted(c.session for c in kept) == ["A/Session1", "B/sub-1_ses-x"]

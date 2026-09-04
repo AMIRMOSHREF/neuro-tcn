@@ -299,12 +299,67 @@ def _first_lick(tr) -> float:
     return float(licks.min() - go) if licks.size else float("nan")
 
 
+def find_duplicate_sessions(caches: list[SessionCache], tol_s: float = 0.002, min_overlap: float = 0.9) -> pd.DataFrame:
+    """Sessions that appear in both ``Data`` (dataset A) and ``Data2`` (dataset B).
+
+    The two on-disk trees were extracted from the same NWB recordings, so a session can be present twice.
+    Two sessions are the same recording when their trials' absolute delay-onset timestamps coincide (within
+    ``tol_s``) for at least ``min_overlap`` of the trials of the smaller session - a fingerprint that cannot
+    match by chance. Training on both copies would leak trials between the training and test sets, and
+    "cross-dataset transfer" would be tested on the training recordings, so ``load_cache`` drops the copy
+    without the audited behavioural log (the ``Data`` copy) unless ``data.drop_duplicate_sessions`` is false.
+    """
+    rows = []
+    a_caches = [c for c in caches if c.dataset == "A"]
+    b_caches = [c for c in caches if c.dataset == "B"]
+    for a in a_caches:
+        ta = _delay_onsets(a)
+        for b in b_caches:
+            tb = _delay_onsets(b)
+            if ta.size == 0 or tb.size == 0:
+                continue
+            if abs(a.n_trials - b.n_trials) > 0.1 * max(a.n_trials, b.n_trials):
+                continue
+            tb_sorted = np.sort(tb)
+            pos = np.searchsorted(tb_sorted, ta)
+            near = np.minimum(np.abs(ta - tb_sorted[np.clip(pos, 0, len(tb_sorted) - 1)]),
+                              np.abs(ta - tb_sorted[np.clip(pos - 1, 0, len(tb_sorted) - 1)]))
+            overlap = float((near <= tol_s).mean())
+            if overlap >= min_overlap:
+                rows.append({"session_a": a.session, "session_b": b.session, "n_trials_a": a.n_trials, "n_trials_b": b.n_trials,
+                             "overlap": overlap, "dropped": a.session})
+    return pd.DataFrame(rows, columns=["session_a", "session_b", "n_trials_a", "n_trials_b", "overlap", "dropped"])
+
+
+def _delay_onsets(c: SessionCache) -> np.ndarray:
+    col = "ep_delay_start_times"
+    if col not in c.meta:
+        return np.zeros(0)
+    return pd.to_numeric(c.meta[col], errors="coerce").dropna().to_numpy(dtype=float)
+
+
+def drop_duplicate_sessions(caches: list[SessionCache], cfg, report_path: Path | None = None) -> list[SessionCache]:
+    dup = find_duplicate_sessions(caches)
+    if report_path is not None:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        dup.to_csv(report_path, index=False)
+    if not len(dup):
+        return caches
+    for _, r in dup.iterrows():
+        log.warning("%s is the same recording as %s (%.0f%% of delay onsets coincide); dropping the Data copy",
+                    r.session_a, r.session_b, 100 * r.overlap)
+    if not bool(cfg.data.get_path("drop_duplicate_sessions", True)):
+        log.warning("data.drop_duplicate_sessions is false: keeping both copies (trials will leak between them)")
+        return caches
+    dropped = set(dup.dropped)
+    return [c for c in caches if c.session not in dropped]
+
+
 def load_cache(cfg) -> list[SessionCache]:
     cache_dir = Path(cfg.data.cache_dir) / _cache_key(cfg)
     paths = sorted(cache_dir.glob("*.npz"))
-    if not paths:
-        return build_cache(cfg)
-    return [SessionCache.load(p) for p in paths]
+    caches = build_cache(cfg) if not paths else [SessionCache.load(p) for p in paths]
+    return drop_duplicate_sessions(caches, cfg, cache_dir / "duplicate_sessions.csv")
 
 
 def cache_summary(caches: list[SessionCache]) -> pd.DataFrame:

@@ -74,7 +74,17 @@ def cmd_inspect(cfg: Config, args) -> None:
     from .data.discovery import discover_all, summarize
     recs = discover_all(cfg)
     pd.set_option("display.width", 200)
-    print(summarize(recs).to_string(index=False))
+    summ = summarize(recs)
+    print(summ.to_string(index=False))
+    # cheap warning before caching: identical trial / class counts across the two trees usually mean the same
+    # recording extracted twice (the definitive check, on epoch timestamps, runs in `cache`).
+    if {"dataset", "n_trials"}.issubset(summ.columns) and set(summ.dataset) >= {"A", "B"}:
+        key = [c for c in ("n_trials", "Ignore", "Left", "Right") if c in summ.columns]
+        a, b = summ[summ.dataset == "A"], summ[summ.dataset == "B"]
+        hits = a.merge(b, on=key, suffixes=("_a", "_b"))
+        if len(hits):
+            print("\nWARNING: identical trial and class counts in both trees (probably the same recordings; `cache` verifies and drops the Data copy):")
+            print(hits[["session_a", "session_b"] + key].to_string(index=False))
     if recs and args.npz_detail:
         data = np.load(recs[0].npz_path, allow_pickle=True)
         print(f"\nFirst NPZ: {recs[0].npz_path}")
@@ -98,13 +108,20 @@ def cmd_inspect(cfg: Config, args) -> None:
 
 
 def cmd_cache(cfg: Config, args) -> None:
-    from .data.cache import build_cache, cache_summary
+    from .data.cache import _cache_key, build_cache, cache_summary, find_duplicate_sessions
     caches = build_cache(cfg, force=args.force)
     pd.set_option("display.width", 250)
     summ = cache_summary(caches)
     print(summ.to_string(index=False))
     if "MB" in summ:
         print(f"total in RAM: {summ.MB.sum():.0f} MB (uint8 counts)")
+    dup = find_duplicate_sessions(caches)
+    dup.to_csv(Path(cfg.data.cache_dir) / _cache_key(cfg) / "duplicate_sessions.csv", index=False)
+    if len(dup):
+        print("\nDUPLICATE RECORDINGS (same trials in Data and Data2; the Data copy is dropped by every later command):")
+        print(dup.to_string(index=False))
+    else:
+        print("\nno session appears in both Data and Data2")
 
 
 def cmd_select(cfg: Config, args) -> None:

@@ -50,6 +50,10 @@ python -m delaycast all --quick                   # sanity run, then: python -m 
 `scripts\run_delaycast.ps1` runs the whole protocol step by step (`-Quick` for the sanity run). Outputs go to
 `outputs\delaycast\` and the binned cache to `cache\` inside the folder you run from.
 
+`cache` also reports **duplicate recordings**: `Data/Session2-4` are the same recordings as three `Data2` sessions
+(same trials, same epoch timestamps). Only the `Data2` copy is used afterwards (`data.drop_duplicate_sessions`), so
+the real corpus is `Data/Session1` plus the 10 `Data2` sessions.
+
 ## Commands (real data)
 
 Point the config at your disks once (defaults are `C:/PythonProject/Rodent/Data` and `.../Data2`), or pass

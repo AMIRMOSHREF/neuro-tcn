@@ -38,6 +38,10 @@ the upcoming action** — and whether that answer is the same across recordings.
 * **NPZ-level QC** (both datasets): licks before the go cue → drop; folder label contradicted by the lick times or licks
   on both sides → drop; delay length deviating from 1.2 s by more than `data.qc.max_delay_dev_ms` → drop; unit count
   changing within a session → drop that trial. `cache/<key>/qc_log.csv` lists every excluded trial with its reason.
+* **Duplicate recordings**: `Data/Session2-4` and three `Data2` sessions are the same recordings extracted twice
+  (identical trial counts, class counts and absolute delay-onset timestamps). `cache` detects such pairs by their
+  epoch-timestamp fingerprint and every later command uses only the `Data2` copy (audited log), so no trial can sit
+  in the training set of one copy and the test set of the other, and cross-dataset transfer is a real transfer.
 * Spikes are binned once into **uint8** count tensors (context 10 ms, right-aligned at the go cue; target 50 ms,
   left-aligned at go) and cached per session; ≈ 100 MB per real session in RAM.
 
