@@ -918,12 +918,17 @@ def _p7(runs: dict) -> dict:
             "result": _summary_line(comp) + _replication_line(comp)}
 
 
-def _p8(runs: dict) -> dict:
+def _p8(runs: dict, population: bool = False) -> dict:
+    """``population``: the random-K arm is not applicable (every arm uses the same channels), so the verdict rests on
+    the chance part alone and the comparator says so."""
     crit = runs.get("cross_dataset/criteria")
     out: dict[str, Any] = {"id": "P8", "title": "Cross-dataset transfer above chance and above random-K after adapter fitting",
                            "comparator": "cross_dataset/criteria vs chance p95 (per seed) and vs cross_dataset/random (paired per session)",
                            "statistic": "pooled balanced accuracy > chance p95 (all seeds) AND paired difference > 0",
                            "failure_condition": "any seed at/below chance p95, or paired test p >= 0.05 / CI lower bound <= 0", "per_seed": []}
+    if population:
+        out.update({"comparator": "cross_dataset/criteria vs chance p95 (per seed); the random-K arm is not applicable to population channels",
+                    "statistic": "pooled balanced accuracy > chance p95 (all seeds)", "failure_condition": "any seed at/below chance p95"})
     if not crit:
         out.update({"verdict": "not run", "result": "missing: cross_dataset/criteria", "comparison": {"verdict": "not run"}})
         return out
@@ -932,13 +937,20 @@ def _p8(runs: dict) -> dict:
         out["per_seed"].append({"seed": int(res.get("seed", 0)), "balanced_accuracy": bacc, "chance_p95": p95,
                                 "pass": bool(bacc > p95) if not (math.isnan(bacc) or math.isnan(p95)) else False})
     chance_pass = bool(out["per_seed"]) and all(r["pass"] for r in out["per_seed"])
+    out["chance_pass"] = chance_pass
+    seeds_line = "; ".join(f"seed{r['seed']}: bacc={_fmt(r['balanced_accuracy'])} p95={_fmt(r['chance_p95'])} {'pass' if r['pass'] else 'FAIL'}"
+                           for r in out["per_seed"])
+    if population:
+        out["comparison"] = {"verdict": "not run", "missing": ["cross_dataset/random (not applicable to population channels)"]}
+        out["parts"] = {"chance": "supported" if chance_pass else "inconclusive"}
+        out["verdict"] = _combine(out["parts"])
+        out["result"] = seeds_line + " || vs random: not applicable (population channels)"
+        return out
     comp = compare_arms(crit, runs.get("cross_dataset/random"), "balanced_accuracy", ">", "cross_dataset/criteria", "cross_dataset/random")
     out["comparison"] = comp
-    out["chance_pass"] = chance_pass
     out["parts"] = {"chance": "supported" if chance_pass else "inconclusive", "random": comp["verdict"]}
     out["verdict"] = _combine(out["parts"])
-    out["result"] = ("; ".join(f"seed{r['seed']}: bacc={_fmt(r['balanced_accuracy'])} p95={_fmt(r['chance_p95'])} {'pass' if r['pass'] else 'FAIL'}"
-                               for r in out["per_seed"]) + f" || vs random: {_summary_line(comp)} -> {comp['verdict']}")
+    out["result"] = seeds_line + f" || vs random: {_summary_line(comp)} -> {comp['verdict']}"
     return out
 
 
@@ -1141,11 +1153,12 @@ def _selection_summary(out_dir: Path, runs: dict) -> dict:
 # ----------------------------------------------------------------------------------------------------------
 
 
-def evaluate_predictions(runs: dict) -> dict[str, dict]:
-    """All predictions, keyed P0..P8 (P1 and P5 split), each with numbers and a verdict."""
+def evaluate_predictions(runs: dict, population: bool = False) -> dict[str, dict]:
+    """All predictions, keyed P0..P8 (P1 and P5 split), each with numbers and a verdict.  ``population``: the runs
+    use identity-free population channels (P8 is then tested against chance only, see :func:`_p8`)."""
     p1a, p1b = _p1(runs)
     preds = {"P0": _p0(runs), "P1a": p1a, "P1b": p1b, "P2": _p2(runs), "P3": _p3(runs), "P4": _p4(runs),
-             "P5a": _p5a(runs), "P5b": _p5b(runs), "P6": _p6(runs), "P7": _p7(runs), "P8": _p8(runs)}
+             "P5a": _p5a(runs), "P5b": _p5b(runs), "P6": _p6(runs), "P7": _p7(runs), "P8": _p8(runs, population=population)}
     for k, v in preds.items():
         assert v["verdict"] in VERDICTS, (k, v["verdict"])
     return preds
@@ -1183,7 +1196,10 @@ def _comparison_md(c: dict, label_a: str | None = None, label_b: str | None = No
 def _verdict_sentence(pid: str, v: str, comp: dict | None = None) -> str:
     base = {"supported": f"**Verdict {pid}: supported.**", "inconclusive": f"**Verdict {pid}: inconclusive** (test possible but the rule was not met).",
             "not testable": f"**Verdict {pid}: not testable** (fewer than {MIN_SESSIONS} sessions or too few trials/cells).",
+            "not applicable": f"**Verdict {pid}: not applicable** (population representation: the prediction is about neurons, the channels are not neurons).",
             "not run": f"**Verdict {pid}: not run** (a required run or key is missing)."}[v]
+    if v == "not applicable":
+        return base
     if comp and comp.get("verdict") not in (None, "not run") and comp.get("n_sessions"):
         base += (f" Mean paired difference {_fmt(comp.get('mean_diff'))}, 95% CI {_fmt_ci(comp.get('ci'))}, "
                  f"Wilcoxon p = {_fmt_p(comp.get('p'))}, n_sessions = {comp.get('n_sessions')}, n_seeds = {comp.get('n_seeds')}.")
@@ -1197,6 +1213,10 @@ def render_markdown(report: dict) -> str:
              + (f", other: {len(h['other_sessions'])}" if h["other_sessions"] else "") + ")")
     L.append(f"* animals: dataset A {h['n_animals']['A']} ({', '.join(h['animals']['A']) or '-'}); dataset B {h['n_animals']['B']} ({', '.join(h['animals']['B']) or '-'})")
     L.append(f"* seeds present: {', '.join(str(s) for s in h['seeds']) or 'none'}")
+    if report.get("representation") == "population":
+        L.append("* **representation: population** - every region enters as identity-free rate-quantile channels (summed counts of the "
+                 "units active in the trial, ranked by delay-epoch count); the Data2 export supports this, so both datasets are in the "
+                 "corpus, and the unit-level predictions P1, P2, P4, P6 are marked not applicable")
     tpc = h["test_trials_per_class"]
     L.append("* test trials per class" + (f" ({h['test_trials_source']}, first seed)" if h["test_trials_source"] else "") + ": "
              + ", ".join(f"{c} = {tpc.get(c) if tpc.get(c) is not None else 'n/a'}" for c in CLASSES) + "\n")
@@ -1328,9 +1348,20 @@ def build_report(cfg, out_dir: Path) -> dict:
             summary = pd.read_csv(p)
         except Exception:  # pragma: no cover
             summary = None
-    report = {"out_dir": str(out_dir), "claim": CLAIM, "header": _header(runs, summary), "predictions": evaluate_predictions(runs),
+    rep_mode = next((str(r.get("representation", "units")) for arm in runs.values() for r in arm if r.get("representation")), "units")
+    report = {"out_dir": str(out_dir), "claim": CLAIM, "header": _header(runs, summary),
+              "predictions": evaluate_predictions(runs, population=(rep_mode == "population")),
               "selection": _selection_summary(out_dir, runs), "outcome": outcome_diagnostic(cfg, runs),
               "rule": {"alpha": ALPHA, "not_lower_margin": NOT_LOWER_MARGIN, "n_bootstrap": N_BOOT, "min_sessions": MIN_SESSIONS}}
+    report["representation"] = rep_mode
+    if rep_mode == "population":
+        # Channels are rate-quantile groups of the units active in the trial, not neurons: every prediction about
+        # *which neurons* (selection vs controls, sparsity, single-unit coupling, per-neuron importance) is
+        # meaningless here and is marked as such; the temporal, regional, spectral and transfer predictions stand.
+        for pid in ("P1a", "P1b", "P2", "P4", "P6"):
+            if pid in report["predictions"]:
+                report["predictions"][pid]["verdict"] = "not applicable"
+                report["predictions"][pid]["result"] = "population representation (identity-free channels): unit-level prediction not applicable"
     report["verdicts"] = {k: v["verdict"] for k, v in report["predictions"].items()}
     return report
 

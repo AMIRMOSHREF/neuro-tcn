@@ -127,7 +127,8 @@ def parse_time_list(value) -> np.ndarray:
         return _to_times(np.asarray(value, dtype=object))
     if isinstance(value, (int, float, np.integer, np.floating)):
         return _EMPTY if not np.isfinite(float(value)) else np.asarray([float(value)])
-    text = str(value).strip().strip("[]()")
+    # a log written with numpy >= 2 prints list elements as "np.float64(22.75)": unwrap before tokenising
+    text = re.sub(r"(?:np\.|numpy\.)?float\d*\(([^()]*)\)", r"\1", str(value)).strip().strip("[]()")
     if text.lower() in ("", "nan", "n/a", "none", "null"):
         return _EMPTY
     out = []
@@ -442,6 +443,47 @@ def load_trial_rasters(npz_path, cfg, metadata: dict | None = None,
         "n_units_extra": n_extra,
     }
     return TrialRasters(context, target, uids, ep, ctx_edges, tgt_edges, lick_left, lick_right, qc)
+
+
+def population_rasters(tr: TrialRasters, n_groups: int = 8) -> TrialRasters:
+    """Identity-free population representation of one trial: per region ``n_groups`` channels, each the summed
+    counts of one rate-quantile group of the units active in the trial.
+
+    Units with at least one spike in the context or target window are ranked by their **delay-epoch** (context)
+    count in this trial - never by response-epoch activity, so nothing from after the go cue enters the context
+    channels; ties are broken by the full count vector (context, then target), so the ranking is a function of
+    the multiset of unit rows only - and split into ``n_groups`` equal groups, most active first; channel g of
+    the context / target raster is the summed count of group g.  Because a unit's rate rank is a stable property,
+    group g approximates the same units from trial to trial, yet the channels are defined without any unit
+    identity - which is exactly what the Data2 export lacks.  Units with no spike in either window are left out
+    of the grouping (they would add nothing to any sum), so the channels are identical whether a file lists every
+    recorded unit (Data) or only the units that fired (Data2), and whatever the order of the rows.
+    """
+    ctx, tgt, ids = {}, {}, {}
+    n_pooled, n_listed = {}, {}
+    for r in REGIONS:
+        X = tr.context[r].astype(np.int64)
+        Y = tr.target[r].astype(np.int64)
+        n_listed[r] = int(X.shape[0])
+        active = (X.sum(axis=1) + Y.sum(axis=1)) > 0
+        X, Y = X[active], Y[active]
+        n_pooled[r] = int(X.shape[0])
+        cx = np.zeros((n_groups, X.shape[1]), dtype=np.int64)
+        tg = np.zeros((n_groups, Y.shape[1]), dtype=np.int64)
+        if X.shape[0]:
+            keys = np.column_stack([-X.sum(axis=1), -X, -Y])          # primary: delay-epoch count (descending)
+            order = np.lexsort(keys.T[::-1])                           # lexsort: last key is the primary one
+            for g, idx in enumerate(np.array_split(order, n_groups)):
+                if idx.size:
+                    cx[g] = X[idx].sum(axis=0)
+                    tg[g] = Y[idx].sum(axis=0)
+        ctx[r] = np.minimum(cx, 255).astype(np.uint8)
+        tgt[r] = np.minimum(tg, 255).astype(np.uint8)
+        ids[r] = np.arange(n_groups, dtype=np.int64)
+    qc = dict(tr.qc)
+    qc["n_units_pooled"] = n_pooled          # active units that entered the channels
+    qc["n_units_listed"] = n_listed          # rows in the file (Data: every unit; Data2: the units that fired)
+    return TrialRasters(ctx, tgt, ids, tr.epochs, tr.ctx_edges, tr.tgt_edges, tr.lick_left, tr.lick_right, qc)
 
 
 def label_from_licks(qc: dict) -> str | None:

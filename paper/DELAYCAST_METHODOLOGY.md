@@ -51,6 +51,18 @@ the upcoming action** — and whether that answer is the same across recordings.
   this kind (units that fired in the trial only, no IDs) and must be re-exported from NWB with the `Data` schema
   (`scripts/export_nwb_trials.py`); `cache` prints the reason and the fix. The cache JSON records the alignment mode and how many units each
   trial contributed versus the union.
+* **Population representation** (`data.representation: population`, `data.population_groups` = 8): the alternative
+  that needs no identity. Per trial and region, the units with at least one spike in the context or target window
+  are ranked by their delay-epoch count (ties broken by the full count vector, so the ranking is a function of the
+  multiset of rows and not of their order), split into 8 equal rate-quantile groups, and each group's summed counts
+  are one channel of the context and of the target raster, most active group first. Silent units add nothing to any
+  sum and are left out of the grouping, so the channels of the `Data` export (every unit listed) and of the `Data2`
+  export (active units only) of the same trial are identical — the three duplicate recordings are a direct check,
+  which `cache` runs in this mode (fraction of matched trials with identical channels, `duplicate_channel_agreement.csv`).
+  The channels are not neurons: no selection is run, every arm takes all channels (the `rate` / `random` arms and
+  the `linonly` / `noskip` ablations are skipped as they would train on identical inputs) and the report marks P1a,
+  P1b, P2, P4 and P6 as not applicable, while P0, P3, P5a/b, P7 and P8 are tested on the full corpus (`Data` +
+  `Data2`, 11 sessions). Cache key suffix `_pop8`; the cache JSON keeps, per trial, how many units were pooled.
 * **NPZ-level QC** (both datasets): licks before the go cue → drop; folder label contradicted by the lick record
   (NPZ arrays, else log row) or licks on both sides → drop; a trial with **no lick record anywhere** keeps its folder
   label (it cannot be verified, `lick_source = none` in the metadata); delay length deviating from 1.2 s by more than
@@ -245,6 +257,8 @@ verdicts with the numbers.
   metrics only, and `logreg_trial_index` flags engagement confounds.
 * `Data` has no CSV log; its QC relies on the lick times stored in each NPZ. `Data2` has no lick arrays in the NPZ;
   its QC relies on the audited log. A Data2 trial without a log row is kept with an unverified label.
+* The population representation trades the neuron-level claim for coverage: with it the corpus is 11 sessions but
+  the verdicts on P1, P2, P4 and P6 are not applicable; only the NWB re-export gives unit-level results on `Data2`.
 * Small sessions (e.g. 153 trials with 109 lick trials) can select **no unit**: the criteria are met by some units but
   none is re-selected in ≥ 60 % of half-subsamples. `select` prints how far the eligible units are from the threshold
   (`max_stability_eligible`); such a session stays in the corpus with an empty criteria set and is reported as such.

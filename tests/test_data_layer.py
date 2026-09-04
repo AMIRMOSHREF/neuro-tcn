@@ -156,6 +156,16 @@ def _strip_licks(payload: dict) -> dict:
 
 
 # ----------------------------------------------------------------------------- rasters.py
+def test_parse_time_list_accepts_numpy2_repr_and_plain_forms():
+    from delaycast.data.rasters import parse_time_list
+
+    assert parse_time_list("[np.float64(22.75), np.float64(22.88)]").tolist() == [22.75, 22.88]
+    assert parse_time_list("[numpy.float32(1.5)]").tolist() == [1.5]
+    assert parse_time_list("2.80, 2.93; 3.05").tolist() == [2.8, 2.93, 3.05]
+    assert parse_time_list("[]").size == 0 and parse_time_list("N/A").size == 0 and parse_time_list(float("nan")).size == 0
+    assert parse_time_list(12.8).tolist() == [12.8] and parse_time_list([1.0, 2.0]).tolist() == [1.0, 2.0]
+
+
 def test_as_unit_list_layouts():
     a, b = np.array([0.5, 1.0, 2.5]), np.array([0.1])
     # ragged object array / list
@@ -736,3 +746,132 @@ def test_session_without_unit_identity_is_excluded(tmp_path, caplog):
     assert list(excl.session) == ["B/sub-1_ses-20190301T120000"] and excl.reason.iloc[0] == "unit_identity_unavailable"
     assert int(excl.n_unit_count_mismatch.iloc[0]) == 8 and "re-export" in excl.fix.iloc[0]
     assert not list((tmp_path / "cache").rglob("B__*.npz"))
+
+
+# ----------------------------------------------------------------------------- population representation
+def test_population_rasters_rank_by_delay_count_and_ignore_silent_units():
+    """Channels are rate-quantile sums ordered by the *context* (delay-epoch) count only; population sums are
+    conserved, and listing silent units (or not) does not change any channel."""
+    from delaycast.data.rasters import TrialRasters, population_rasters
+
+    T, Tt = 6, 4
+    ctx = {r: np.zeros((0, T), np.uint8) for r in REGIONS}
+    tgt = {r: np.zeros((0, Tt), np.uint8) for r in REGIONS}
+    # ALM_L: unit 0 quiet in the delay but very active in the response, unit 1 the most active in the delay
+    ctx["ALM_L"] = np.array([[0, 1, 0, 0, 1, 0], [3, 3, 3, 3, 3, 3], [1, 1, 1, 1, 1, 1]], np.uint8)
+    tgt["ALM_L"] = np.array([[9, 9, 9, 9], [0, 0, 0, 0], [1, 1, 1, 1]], np.uint8)
+    ids = {r: np.arange(ctx[r].shape[0]) for r in REGIONS}
+    edges_c, edges_t = np.arange(T + 1, dtype=float), np.arange(Tt + 1, dtype=float)
+    tr = TrialRasters(ctx, tgt, ids, {}, edges_c, edges_t, np.empty(0), np.empty(0), {"lick_source": "npz"})
+    pop = population_rasters(tr, 3)
+    assert pop.context["ALM_L"].shape == (3, T) and pop.target["ALM_L"].shape == (3, Tt)
+    assert pop.context["ALM_L"].tolist() == [[3] * 6, [1] * 6, [0, 1, 0, 0, 1, 0]]   # delay rank, not response rank
+    assert pop.target["ALM_L"].tolist() == [[0] * 4, [1] * 4, [9] * 4]
+    for r in REGIONS:
+        assert pop.context[r].dtype == np.uint8 and pop.context[r].shape == (3, T)
+        assert pop.context[r].astype(int).sum() == ctx[r].astype(int).sum()
+        assert pop.target[r].astype(int).sum() == tgt[r].astype(int).sum()
+        assert pop.unit_ids[r].tolist() == [0, 1, 2]
+    assert pop.qc["n_units_pooled"] == {"ALM_L": 3, "ALM_R": 0, "STR_L": 0, "STR_R": 0} and pop.qc["lick_source"] == "npz"
+    # silent units listed in the file (Data lists every unit, Data2 only the ones that fired) and the row order
+    # change nothing: the channels are a function of the multiset of non-zero unit rows
+    rng = np.random.default_rng(1)
+    for _ in range(5):
+        perm = rng.permutation(5)
+        ctx2 = dict(ctx, ALM_L=np.vstack([ctx["ALM_L"], np.zeros((2, T), np.uint8)])[perm])
+        tgt2 = dict(tgt, ALM_L=np.vstack([tgt["ALM_L"], np.zeros((2, Tt), np.uint8)])[perm])
+        pop2 = population_rasters(TrialRasters(ctx2, tgt2, ids, {}, edges_c, edges_t, np.empty(0), np.empty(0), {}), 3)
+        assert np.array_equal(pop2.context["ALM_L"], pop.context["ALM_L"]) and np.array_equal(pop2.target["ALM_L"], pop.target["ALM_L"])
+        assert pop2.qc["n_units_pooled"]["ALM_L"] == 3 and pop2.qc["n_units_listed"]["ALM_L"] == 5
+    # ties in the delay count are broken by the count vectors, so equal-count units land in the same channel
+    # whatever their order in the file (two units with delay count 6 and different profiles, one group boundary)
+    ctx3 = dict(ctx, ALM_L=np.array([[1, 1, 1, 1, 1, 1], [2, 0, 2, 0, 2, 0], [0, 2, 0, 2, 0, 2], [0, 0, 0, 0, 0, 1]], np.uint8))
+    tgt3 = dict(tgt, ALM_L=np.zeros((4, Tt), np.uint8))
+    ref = population_rasters(TrialRasters(ctx3, tgt3, ids, {}, edges_c, edges_t, np.empty(0), np.empty(0), {}), 2).context["ALM_L"]
+    for perm in ([1, 0, 2, 3], [3, 2, 1, 0], [2, 3, 0, 1]):
+        c = dict(ctx3, ALM_L=ctx3["ALM_L"][perm])
+        got = population_rasters(TrialRasters(c, tgt3, ids, {}, edges_c, edges_t, np.empty(0), np.empty(0), {}), 2).context["ALM_L"]
+        assert np.array_equal(got, ref)
+    # more groups than units: the empty groups are zero channels, the channel count is still fixed
+    pop8 = population_rasters(tr, 8)
+    assert pop8.context["ALM_L"].shape == (8, T) and pop8.context["ALM_L"][3:].sum() == 0 and pop8.context["STR_R"].shape == (8, T)
+
+
+def test_population_mode_keeps_sessions_without_unit_identity_and_uses_all_channels(tmp_path, caplog):
+    """The same identity-less Data2 export that the unit representation refuses is usable as population channels:
+    a fixed channel count per region, no exclusion, a separate cache key, and every training arm takes all channels."""
+    from delaycast.data.cache import _cache_key, cache_summary, excluded_sessions
+    from delaycast.data.dataset import choose_indices
+
+    rng = np.random.default_rng(9)
+    base = {"ALM_L": 3, "ALM_R": 2, "STR_L": 2, "STR_R": 1}
+    for i in range(1, 13):
+        cls = ["Left", "Right"][i % 2]
+        n = dict(base, ALM_L=3 + (i % 3))
+        _write_b(tmp_path, i, cls, _to_split(_payload(rng, n, cls, t0=10.0 * i)))
+    cfg = _cfg(tmp_path)
+    cfg.set_path("data.representation", "population")
+    cfg.set_path("data.population_groups", 4)
+    assert _cache_key(cfg).endswith("_pop4") and not _cache_key(_cfg(tmp_path)).endswith("_pop4")
+    with caplog.at_level(logging.ERROR, logger="delaycast.data.cache"):
+        caches = build_cache(cfg, force=True)
+    assert not any("EXCLUDED" in r.message for r in caplog.records)
+    assert len(caches) == 1 and excluded_sessions(cfg).empty
+    c = caches[0]
+    assert c.n_trials == 12 and c.n_units == {r: 4 for r in REGIONS}
+    assert c.qc_info["representation"] == "population" and c.qc_info["unit_alignment"] == "population"
+    assert c.qc_info["units_pooled"]["ALM_L"] == 4 and c.qc_info["units_pooled"]["STR_R"] == 1     # median units per trial
+    assert c.qc_info["drop_reasons"].get("unit_count_mismatch", 0) == 0
+    assert (c.meta.pooled_ALM_L.values == np.array([3 + (i % 3) for i in range(1, 13)])).all()
+    summ = cache_summary(caches)
+    assert "units pooled" in summ["align"].iloc[0]
+    # the population sum of a region is conserved (channel sums = summed unit counts of the trial)
+    tot = c.context["ALM_L"].astype(int).sum(axis=(1, 2))
+    assert (tot > 0).all()
+    # every neuron-set arm takes all channels; the criteria arm needs no SelectionResult
+    r = np.random.default_rng(0)
+    for mode in ("criteria", "rate", "random"):
+        idx = choose_indices(None, c, cfg, mode, r)
+        assert all(idx[reg].tolist() == [0, 1, 2, 3] for reg in REGIONS), mode
+    assert not list((tmp_path / "cache").rglob("*/excluded_sessions.csv")) or excluded_sessions(cfg).empty
+
+
+def test_population_channels_agree_between_data_and_data2_exports_of_the_same_recording(tmp_path):
+    """The same recording exported twice - Data: every unit with IDs and NPZ licks; Data2: pre-split arrays of the
+    units that fired, shuffled, licks in the log - gives identical population channels trial by trial."""
+    from delaycast.data.cache import duplicate_channel_agreement, find_duplicate_sessions
+
+    rng = np.random.default_rng(11)
+    n = {"ALM_L": 6, "ALM_R": 4, "STR_L": 3, "STR_R": 2}
+    log_rows = []
+    for i in range(1, 15):
+        cls = ["Left", "Right"][i % 2]
+        pay = _payload(rng, n, cls, t0=20.0 * i)
+        # two silent units in the Data export (never spike in this trial), absent from the Data2 export
+        spikes = list(pay["spike_times"])
+        spikes[0], spikes[7] = np.empty(0), np.empty(0)
+        pay["spike_times"] = _object_array(spikes)
+        _write_a(tmp_path, "Session1", i, cls, pay)
+        keep = [k for k in range(len(spikes)) if len(spikes[k])]
+        perm = rng.permutation(len(keep))
+        b = dict(pay)
+        b["unit_ids"] = np.asarray(pay["unit_ids"])[keep][perm]
+        b["brain_region"] = np.asarray(pay["brain_region"])[keep][perm]
+        b["spike_times"] = _object_array([spikes[keep[q]] for q in perm])
+        _write_b(tmp_path, i, cls, _strip_licks(_to_split(b)))
+        licks = pay["left_lick_times"] if cls == "Left" else pay["right_lick_times"]
+        # str(list(array)) under numpy >= 2 writes "np.float64(...)" elements - a log format the parser must accept
+        log_rows.append({"trial": i, "outcome": "hit", "trial_instruction": cls.lower(), "early_lick": "no early",
+                         "left_lick_times": str(list(licks)) if cls == "Left" else "[]",
+                         "right_lick_times": str(list(licks)) if cls == "Right" else "[]", "excluded": False, "photostim_onset": "N/A"})
+    _write_b_csv(tmp_path, log_rows)
+    cfg = _cfg(tmp_path)
+    cfg.set_path("data.representation", "population")
+    caches = build_cache(cfg, force=True)
+    assert sorted(c.dataset for c in caches) == ["A", "B"]
+    dup = find_duplicate_sessions(caches)
+    assert len(dup) == 1
+    agree = duplicate_channel_agreement(caches, dup)
+    assert int(agree.n_matched_trials.iloc[0]) == 14
+    assert agree.frac_identical_context.iloc[0] == 1.0 and agree.frac_identical_target.iloc[0] == 1.0
+    assert agree.frac_same_label.iloc[0] == 1.0

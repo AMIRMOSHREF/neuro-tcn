@@ -143,16 +143,21 @@ def prepare_sessions(cfg: Config, caches: dict[str, SessionCache], mode: str = "
     ``rate`` / ``random`` control arms take, per session and region, as many units as the criteria selection of
     the same split produced (K_eff), so that "above rate-matched and random subsets of the same size" is what is
     tested (``selection.match_k_to_criteria``; ``match_k=False`` forces K, used by the negative-control fallback,
-    where the permuted-label criteria set is empty by construction)."""
+    where the permuted-label criteria set is empty by construction).
+
+    ``data.representation: population``: no selection at all - the rate-quantile channels are not neurons and
+    every arm uses all of them."""
     seed = int(cfg.train.seed) if seed is None else int(seed)
     held = set(holdout or [])
     holdout_mode = str(cfg.selection.get_path("holdout_mode", "label_free"))
     if match_k is None:
         match_k = bool(cfg.selection.get_path("match_k_to_criteria", True))
+    population = str(cfg.data.get_path("representation", "units")).lower() == "population"
     selections, tensors = [], []
     for s, c in caches.items():
         idx = fit_trials(splits[s]) if splits is not None else None
-        need_sel = mode == "criteria" or (match_k and mode in ("rate", "random"))
+        # population channels are not neurons: nothing is selected, every arm takes all channels (choose_indices)
+        need_sel = (not population) and (mode == "criteria" or (match_k and mode in ("rate", "random")))
         sel = None
         if need_sel:
             if s in held and holdout_mode == "label_free":

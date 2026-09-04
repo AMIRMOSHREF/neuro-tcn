@@ -332,3 +332,27 @@ def test_report_excludes_empty_criteria_sessions_and_counts_replication(cfg, tmp
     # P3 (ii) and P5a pair only the sessions with units
     assert [r["session"] for r in rep["predictions"]["P3"]["comparison"]["table"]] == sorted(SESSIONS[1:])
     assert [r["session"] for r in rep["predictions"]["P5a"]["comparison"]["table"]] == sorted(SESSIONS[1:])
+
+
+def test_population_representation_marks_unit_level_predictions_not_applicable(cfg, tmp_path):
+    """With identity-free population channels the report keeps the temporal / regional / spectral / transfer
+    predictions and marks every prediction about neurons as not applicable, with a banner in the header."""
+    out = tmp_path / "out"
+    crit = make_results(CRIT, "criteria", full=True)
+    crit["representation"] = "population"
+    _write_run(out, "within", "criteria", crit)
+    _write_run(out, "negative_control", "criteria", make_results([0.34] * 6, "criteria", chance_p95=0.42, negative_control=True))
+    xs = make_results(CRIT, "criteria")
+    xs["eval_mode"], xs["representation"] = "cross_dataset", "population"
+    _write_run(out, "cross_dataset", "criteria", xs)          # no cross_dataset/random arm: not applicable here
+    _, rep, text = _run_report(cfg, out)
+    assert rep["representation"] == "population"
+    assert rep["verdicts"]["P8"] == "supported" and "not applicable" in rep["predictions"]["P8"]["result"]
+    assert "Mean paired difference" not in text.split("Verdict P2")[1].split("\n")[0]
+    for pid in ("P1a", "P1b", "P2", "P4", "P6"):
+        assert rep["verdicts"][pid] == "not applicable", pid
+        assert "not applicable" in rep["predictions"][pid]["result"]
+    for pid in ("P0", "P3", "P5a", "P5b", "P7", "P8"):
+        assert rep["verdicts"][pid] != "not applicable", pid
+    assert rep["verdicts"]["P0"] == "supported"
+    assert "representation: population" in text and "Verdict P2: not applicable" in text

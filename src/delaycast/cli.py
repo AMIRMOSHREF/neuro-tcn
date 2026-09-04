@@ -163,7 +163,8 @@ def _npz_detail(recs) -> None:
 
 
 def cmd_cache(cfg: Config, args) -> None:
-    from .data.cache import _cache_key, build_cache, cache_summary, excluded_sessions, find_duplicate_sessions
+    from .data.cache import (_cache_key, build_cache, cache_summary, duplicate_channel_agreement, excluded_sessions,
+                             find_duplicate_sessions, representation)
     caches = build_cache(cfg, force=args.force)
     pd.set_option("display.width", 250)
     summ = cache_summary(caches)
@@ -189,14 +190,24 @@ def cmd_cache(cfg: Config, args) -> None:
     if len(dup):
         print("\nDUPLICATE RECORDINGS (same trials in Data and Data2; the `dropped` copy is ignored by every later command):")
         print(dup.to_string(index=False))
+        if representation(cfg) == "population":
+            agree = duplicate_channel_agreement(caches, dup)
+            agree.to_csv(Path(cfg.data.cache_dir) / _cache_key(cfg) / "duplicate_channel_agreement.csv", index=False)
+            print("\nPOPULATION CHANNELS OF THE TWO EXPORTS (matched trials; 1.0 = the Data and Data2 files of the same trial "
+                  "give identical channels, as the representation is designed to; lower = the exports curate units differently):")
+            print(agree.to_string(index=False))
     else:
         print("\nno session appears in both Data and Data2")
 
 
 def cmd_select(cfg: Config, args) -> None:
     """Descriptive selection on ALL trials (never consumed by `train`, which re-selects on the training split)."""
-    from .data.cache import load_cache
+    from .data.cache import load_cache, representation
     from .features.selection import select_neurons, selection_summary
+    if representation(cfg) == "population":
+        print("data.representation=population: the channels are rate-quantile groups of the units active in each trial, "
+              "not neurons - there is nothing to select; every training arm uses all channels (P1, P2, P4, P6 not applicable).")
+        return
     caches = load_cache(cfg)
     out = Path(cfg.output_dir) / "selection"
     out.mkdir(parents=True, exist_ok=True)
@@ -294,11 +305,26 @@ def _validate_arms(modes: list[str], variants: list[str]) -> None:
         raise SystemExit(f"unknown --modes {bad_m} / --variants {bad_v} (modes: criteria,rate,random; variants: popmean,nospec,noskip,linonly)")
 
 
+def _population_arms(cfg: Config, modes: list[str], variants: list[str]) -> tuple[list[str], list[str]]:
+    """In the population representation the neuron-set arms (rate, random) and the unit-level model ablations
+    (linonly, noskip) would all train on the same channels: keep the criteria arm and the spectral controls only."""
+    from .data.cache import representation
+    if representation(cfg) != "population":
+        return modes, variants
+    keep_m = [m for m in modes if m == "criteria"] or ["criteria"]
+    keep_v = [v for v in variants if v in ("popmean", "nospec")]
+    dropped = [m for m in modes if m not in keep_m] + [v for v in variants if v not in keep_v]
+    if dropped:
+        log.info("population representation: arms %s skipped (identical channels in every neuron-set arm; unit-level ablations not applicable)", dropped)
+    return keep_m, keep_v
+
+
 def cmd_train(cfg: Config, args) -> None:
     from .train import get_caches
     modes = _list(args.modes) or ["criteria"]
     variants = _list(getattr(args, "variants", None))
     _validate_arms(modes, variants)
+    modes, variants = _population_arms(cfg, modes, variants)
     caches = get_caches(cfg)
     kind, holdouts = _holdout_plan(cfg, caches, args)
     for seed in _seeds(cfg, args):
@@ -335,15 +361,28 @@ def cmd_evaluate(cfg: Config, args) -> None:
 
 
 # ----------------------------------------------------------------------------- figures
+POPULATION_FIGURE_NOTE = ("population representation: every channel is one rate-quantile group of the units active in the trial "
+                          "(channel 1 = most active), all channels are model inputs; criteria descriptive only")
+
+
 def _selection_table_for(cfg: Config, session: str, caches: dict) -> tuple[pd.DataFrame, str, pd.DataFrame | None, np.ndarray | None]:
     """Selection table shown in Figures 1-2: the criteria run's train-split table when it exists (what the model
     used), else the descriptive all-trial table from `select`, else computed now.
 
     Returns (table, note, importance | None, fit_trials | None); ``fit_trials`` is the trial subset the statistics
     were computed on, so the class-conditional figure panels can be restricted to the same trials."""
+    from .data.cache import representation
     from .features.selection import select_neurons
     from .runs import list_runs
     from .train import fit_trials
+    if representation(cfg) == "population":
+        # The channels are the model's inputs, all of them: the descriptive criteria are computed for the strip
+        # only and every channel is marked as used (there is no selection to show).
+        tab = select_neurons(caches[session], cfg, seed=int(cfg.train.seed), n_null=0).table
+        if len(tab):
+            tab["selected"], tab["eligible"], tab["pass_floor"], tab["stable"] = True, True, True, True
+            tab["rank"] = tab["unit_index"].astype(int) + 1
+        return tab, POPULATION_FIGURE_NOTE, None, None
     tag = session.replace("/", "__")
     runs = [r for r in list_runs(cfg.output_dir) if r.kind == "within" and r.mode == "criteria" and not r.variant]
     imp = None
@@ -398,6 +437,7 @@ def _fig1_for_trial(cfg: Config, cache, ti: int | None, npz_path: Path, out_path
 
 
 def cmd_figures(cfg: Config, args) -> None:
+    from .data.cache import representation
     from .figures import plot_attention, plot_results, plot_time_frequency
     from .runs import list_runs, load_results
     from .train import get_caches
@@ -419,13 +459,19 @@ def cmd_figures(cfg: Config, args) -> None:
         for c in (cache_list if args.all_sessions else cache_list[:1]):
             idx = np.where(c.labels == CLASSES.index("Left"))[0]
             targets.append((c, int(idx[0]) if len(idx) else 0))
+    population = representation(cfg) == "population"
+    if population:
+        print("Figure 1 (every recorded unit + the selected set) is not applicable to the population representation: the rows "
+              "of a trial file are units, the model's inputs are rate-quantile channels; run the units representation for it.")
     for c, ti in targets:
         tag = c.session.replace("/", "__")
         npz = Path(c.meta.npz_path.iloc[ti])
-        p1 = _fig1_for_trial(cfg, c, ti, npz, fig_dir / f"fig1_raster_selection_{tag}.png", caches)
+        if not population:
+            p1 = _fig1_for_trial(cfg, c, ti, npz, fig_dir / f"fig1_raster_selection_{tag}.png", caches)
+            print(f"wrote {p1}")
         tab, _, _, fit = _selection_table_for(cfg, c.session, caches)
         p2 = plot_time_frequency(c, tab, cfg, ti, fig_dir / f"fig2_time_frequency_{tag}.png", fit_idx=fit)
-        print(f"wrote {p1}\nwrote {p2}")
+        print(f"wrote {p2}")
 
     results = load_results(cfg.output_dir)
     if not results:
@@ -463,9 +509,13 @@ def cmd_figure1(cfg: Config, args) -> None:
     from .data.cache import _cache_key
     from .data.discovery import parse_trial_number
     from .train import get_caches
+    from .data.cache import representation
     npz = Path(args.npz)
     if not npz.is_file():
         sys.exit(f"{npz} does not exist")
+    if representation(cfg) == "population":
+        sys.exit("figure1 is not applicable to data.representation=population (the rows of a trial file are units, the model's "
+                 "inputs are rate-quantile channels); use the units representation for Figure 1")
     caches = get_caches(cfg)
     session = args.session or _session_of_npz(npz)
     if session not in caches:
@@ -508,6 +558,7 @@ def cmd_all(cfg: Config, args) -> None:
     seeds = [int(cfg.train.seed)] if args.quick else _seeds(cfg, args)
     modes = _list(args.modes) or ["criteria", "rate", "random"]
     variants = [] if args.quick else _list(args.variants)
+    modes, variants = _population_arms(cfg, modes, variants)
     for seed in seeds:
         for mode in modes:
             _train_one(cfg, mode, "", seed, "within", caches, None, False)
@@ -519,7 +570,7 @@ def cmd_all(cfg: Config, args) -> None:
         if len(datasets) >= 2:
             cfg_x = _clone(cfg, **{"train.eval_mode": "cross_dataset"})
             _, holds = _holdout_plan(cfg_x, caches, argparse.Namespace(negative_control=False, holdout=None))
-            for mode in ("criteria", "random"):
+            for mode in _population_arms(cfg, ["criteria", "random"], [])[0]:
                 _train_one(cfg_x, mode, "", seeds[0], "cross_dataset", caches, holds, False)
         _train_one(cfg, "criteria", "", seeds[0], "negative_control", caches, None, True)
     cmd_figures(cfg, argparse.Namespace(all_sessions=args.all_sessions))

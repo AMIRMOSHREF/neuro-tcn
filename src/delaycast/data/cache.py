@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 from .. import CLASSES, CLASS_TO_IDX, REGIONS
 from .discovery import TrialRecord, discover_all
-from .rasters import label_from_licks, load_trial_rasters, unit_ids_by_region
+from .rasters import label_from_licks, load_trial_rasters, population_rasters, unit_ids_by_region
 
 log = logging.getLogger(__name__)
 
@@ -141,10 +141,22 @@ read by a newer loader (v2: unit alignment by ID, log lick times, miss trials ke
 the log, sessions without unit identity excluded)."""
 
 
+def representation(cfg) -> str:
+    """``units`` (default: one row per recorded unit, identity by unit_ids) or ``population`` (identity-free
+    rate-quantile channels per region, see :func:`delaycast.data.rasters.population_rasters`)."""
+    rep = str(cfg.data.get_path("representation", "units")).lower()
+    if rep not in ("units", "population"):
+        raise ValueError(f"data.representation must be 'units' or 'population', got {rep!r}")
+    return rep
+
+
 def _cache_key(cfg) -> str:
     c = cfg.data
-    return (f"bin{c.bin_ms}_tbin{c.target_bin_ms}_ctx{int(c.context.include_sample)}_{c.context.pre_delay_ms}"
-            f"_resp{c.target.response_ms}_v{LOADER_VERSION}")
+    key = (f"bin{c.bin_ms}_tbin{c.target_bin_ms}_ctx{int(c.context.include_sample)}_{c.context.pre_delay_ms}"
+           f"_resp{c.target.response_ms}_v{LOADER_VERSION}")
+    if representation(cfg) == "population":
+        key += f"_pop{int(c.get_path('population_groups', 8))}"
+    return key
 
 
 # A session whose NPZs carry no unit identity (pre-split arrays without IDs) and whose unit count changes from
@@ -236,7 +248,12 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
             caches.append(SessionCache.load(out_path))
             continue
         recs = sorted(recs, key=lambda x: x.trial)
-        unit_index, align_info = _unit_universe(recs)
+        pop = representation(cfg) == "population"
+        n_groups = int(cfg.data.get_path("population_groups", 8))
+        if pop:   # identity-free channels: no unit universe, no positional identity, nothing to align
+            unit_index, align_info = None, {"unit_alignment": "population", "unit_alignment_note": f"{n_groups} rate-quantile channels per region"}
+        else:
+            unit_index, align_info = _unit_universe(recs)
         if unit_index is not None and align_info["units_per_trial_min"] < align_info["units_union"]:
             log.info("%s: units aligned by ID; %d units in the session, %d-%d present per trial (absent units = silent, zero rows)",
                      sess, align_info["units_union"], align_info["units_per_trial_min"], align_info["units_per_trial_max"])
@@ -254,6 +271,8 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
             keep, reason = _csv_flags(rec, cfg)
             try:
                 tr = load_trial_rasters(rec.npz_path, cfg, metadata=rec.csv, unit_index=unit_index)
+                if pop:
+                    tr = population_rasters(tr, n_groups)
             except Exception as e:  # corrupted / incomplete NPZ
                 reason = f"load_error:{e}"
                 qc_rows.append({"session": sess, "trial": rec.trial, "label": rec.label, "kept": False, "reason": reason})
@@ -324,9 +343,10 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
                          "first_lick_s": _first_lick(tr), "lick_source": tr.qc.get("lick_source", ""),
                          "csv_outcome": str(rec.csv.get("outcome", "")) if rec.csv else "",
                          "csv_instruction": str(rec.csv.get("trial_instruction", "")) if rec.csv else "",
+                         **({f"pooled_{r}": v for r, v in tr.qc.get("n_units_pooled", {}).items()} if pop else {}),
                          **{f"ep_{k}": v for k, v in tr.epochs.items()}})
         n_mismatch = drop_reasons.get("unit_count_mismatch", 0)
-        if unit_index is None and len(recs) >= 10 and n_mismatch > MAX_POSITIONAL_MISMATCH_FRAC * len(recs):
+        if unit_index is None and not pop and len(recs) >= 10 and n_mismatch > MAX_POSITIONAL_MISMATCH_FRAC * len(recs):
             log.error("session %s EXCLUDED: unit count differs from the first trial's in %d of %d trials and %s",
                       sess, n_mismatch, len(recs), UNIT_IDENTITY_FIX)
             excluded_rows.append({"session": sess, "n_discovered": len(recs), "n_unit_count_mismatch": n_mismatch,
@@ -353,6 +373,8 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
             qc_info={"length_fixes": len_fix, "n_discovered": len(recs), "n_kept": n_kept,
                      "n_dropped": len(recs) - n_kept, "drop_reasons": drop_reasons,
                      "delay_ms": delay_ms, "max_delay_dev_ms": max_dev_ms, **align_info,
+                     "representation": "population" if pop else "units",
+                     "units_pooled": ({r: int(np.median([m.get(f"pooled_{r}", 0) for m in meta])) for r in REGIONS} if pop else None),
                      "lick_sources": lick_sources, "lick_labels": lick_labels},
         )
         sc.save(out_path)
@@ -434,6 +456,43 @@ def find_duplicate_sessions(caches: list[SessionCache], tol_s: float = 0.002, mi
     return pd.DataFrame(rows, columns=["session_a", "session_b", "n_trials_a", "n_trials_b", "units_a", "units_b", "overlap", "dropped"])
 
 
+def duplicate_channel_agreement(caches: list[SessionCache], dup: pd.DataFrame, tol_s: float = 0.002) -> pd.DataFrame:
+    """Population representation only: for every duplicate pair, the fraction of matched trials (same delay-onset
+    timestamp) whose context and target channels are *identical* in the ``Data`` and the ``Data2`` export.
+
+    The two exports list different unit sets (every unit vs. the units that fired), in different orders, with
+    different epoch key names; the rate-quantile channels are designed to be a function of the multiset of non-zero
+    unit rows only, so a real recording present in both trees is the direct check that the representation - and the
+    binning behind it - agrees across the two exports.  Anything below 1.0 points at a curation difference between
+    the exports (units dropped by one of them), not at a bug in the channels."""
+    by = {c.session: c for c in caches}
+    rows = []
+    for _, d in dup.iterrows():
+        a, b = by.get(d.session_a), by.get(d.session_b)
+        if a is None or b is None:
+            continue
+        ta = pd.to_numeric(a.meta.get("ep_delay_start_times"), errors="coerce").to_numpy(dtype=float)
+        tb = pd.to_numeric(b.meta.get("ep_delay_start_times"), errors="coerce").to_numpy(dtype=float)
+        n_match, n_same_ctx, n_same_tgt, n_same_label = 0, 0, 0, 0
+        for i, t in enumerate(ta):
+            if not np.isfinite(t):
+                continue
+            j = np.flatnonzero(np.abs(tb - t) <= tol_s)
+            if j.size != 1:
+                continue
+            j = int(j[0])
+            n_match += 1
+            n_same_ctx += all(np.array_equal(a.context[r][i], b.context[r][j]) for r in REGIONS)
+            n_same_tgt += all(np.array_equal(a.target[r][i], b.target[r][j]) for r in REGIONS)
+            n_same_label += int(a.labels[i] == b.labels[j])
+        rows.append({"session_a": d.session_a, "session_b": d.session_b, "n_matched_trials": n_match,
+                     "frac_identical_context": n_same_ctx / n_match if n_match else float("nan"),
+                     "frac_identical_target": n_same_tgt / n_match if n_match else float("nan"),
+                     "frac_same_label": n_same_label / n_match if n_match else float("nan")})
+    return pd.DataFrame(rows, columns=["session_a", "session_b", "n_matched_trials", "frac_identical_context",
+                                       "frac_identical_target", "frac_same_label"])
+
+
 def _delay_onsets(c: SessionCache) -> np.ndarray:
     col = "ep_delay_start_times"
     if col not in c.meta:
@@ -502,6 +561,8 @@ def cache_summary(caches: list[SessionCache]) -> pd.DataFrame:
         reasons = qi.get("drop_reasons", {}) or {}
         row["drop_reasons"] = ", ".join(f"{k}:{v}" for k, v in sorted(reasons.items(), key=lambda kv: -kv[1])) or "-"
         row["align"] = str(qi.get("unit_alignment", "?"))
+        if qi.get("units_pooled"):
+            row["align"] += " (" + "/".join(str(v) for v in qi["units_pooled"].values()) + " units pooled)"
         srcs = qi.get("lick_sources", {}) or {}
         row["licks"] = "/".join(f"{k}:{v}" for k, v in srcs.items()) or "?"
         labs = qi.get("lick_labels", {}) or {}

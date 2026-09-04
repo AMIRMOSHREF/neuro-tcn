@@ -33,6 +33,9 @@ def choose_indices(sel: SelectionResult | None, cache: SessionCache, cfg, mode: 
                    trial_idx: np.ndarray | None = None, k_per_region: dict[str, int] | None = None) -> dict[str, np.ndarray]:
     """``criteria`` (default), ``rate`` (the most active units on the fit trials, no selectivity) or ``random``.
 
+    With ``data.representation: population`` every mode returns all channels of the region (see
+    :func:`delaycast.data.rasters.population_rasters`).
+
     ``k_per_region`` sets how many units the ``rate`` / ``random`` sets take per region: the claim compares the
     criteria set with rate-matched and random subsets *of the same size*, so the control arms are matched to the
     number of units the criteria selection actually produced in that session and region (K_eff <= K), not to K.
@@ -40,10 +43,15 @@ def choose_indices(sel: SelectionResult | None, cache: SessionCache, cfg, mode: 
     k = int(cfg.selection.top_k_per_region)
     out = {}
     idx = np.arange(cache.n_trials) if trial_idx is None else np.asarray(trial_idx, dtype=int)
+    population = str(cfg.data.get_path("representation", "units")).lower() == "population"
     for r in REGIONS:
         n = cache.context[r].shape[1]
         kr = k if k_per_region is None else min(k, max(0, int(k_per_region.get(r, k))))
-        if mode == "criteria":
+        if population:
+            # Identity-free rate-quantile channels are not neurons: there is nothing to select, so every arm
+            # uses all of them (the selection-vs-controls predictions are reported as not applicable).
+            out[r] = np.arange(min(n, k), dtype=int)
+        elif mode == "criteria":
             if sel is None:
                 raise ValueError("mode='criteria' needs a SelectionResult")
             out[r] = np.asarray(sel.selected[r][:k], dtype=int)

@@ -10,6 +10,9 @@ data:
   use_dataset_a: true
   use_dataset_b: true
   cache_dir: "cache"         # binned per-session tensors are stored here (safe to delete)
+  representation: units      # units: one row per recorded unit (needs unit identity across trials) | population: identity-free
+                             # rate-quantile channels per region (works on the Data2 export; unit-level claims not applicable)
+  population_groups: 8       # channels per region in the population representation
   drop_duplicate_sessions: true   # a session present in both Data and Data2 (same recording) is used once
   duplicate_keep: A          # which copy of a duplicated recording is kept: A (Data: every unit with IDs, NPZ lick times,
                              # same class labels) | B (Data2: audited log, but its NPZs list only units that fired per trial)

@@ -19,6 +19,15 @@ verdict. Where a `Data` session matches a `Data2` audited log by trial numbers, 
 run's Left/Right accuracy by behavioural outcome (hit / miss), because a decoder of the upcoming *action* is expected
 to fail more often on trials in which the animal licked against the instruction.
 
+**Population representation** (`data.representation: population`, runner switch `-Population`). The `Data2` export
+lost unit identity, so its seven non-duplicate sessions can only enter as identity-free channels: per trial and
+region the active units are ranked by delay-epoch count and split into 8 rate-quantile groups whose summed counts
+are the channels (a pure function of the multiset of unit rows — identical for the `Data` and `Data2` exports of the
+same trial). Under this representation every arm uses all channels, so the predictions *about neurons* — **P1a, P1b,
+P2, P4, P6** — are reported as **not applicable** (never as supported or inconclusive); **P0, P3, P5a, P5b, P7, P8**
+keep their rules and are tested on the full 11-session corpus. A population-level verdict is evidence about the
+*time course, region and spectral content* of the delay activity, not about the sparse neuron set of the claim.
+
 ## The claim
 
 > During the 1.2 s delay of the auditory delayed-response task, (i) a criterion-selected subset of at most 32 units per

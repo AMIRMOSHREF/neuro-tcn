@@ -445,6 +445,7 @@ def evaluate_run(run: dict, cfg, caches: dict | None = None) -> dict:
     results: dict = {"mode": run.get("mode"), "seed": int(run.get("seed", cfg.train.seed)), "holdout": run.get("holdout", []),
                      "eval_mode": str(cfg.train.eval_mode), "negative_control": bool(run.get("negative_control", False)),
                      "spectral_branch": model.spectral_branch, "adapt_info": run.get("adapt_info", {}), "occlusion": occl,
+                     "representation": str(cfg.data.get_path("representation", "units")),
                      # units actually used per session x region (K_eff): the report excludes sessions with an empty set
                      "n_selected": {t.session: {r: int(np.asarray(t.neuron_mask[r]).sum()) for r in REGIONS} for t in tensors}}
     if not tests:

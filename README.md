@@ -48,7 +48,9 @@ python -m delaycast all --quick                   # sanity run, then: python -m 
 ```
 
 `scripts\run_delaycast.ps1` runs the whole protocol step by step (`-Quick` for the sanity run). Outputs go to
-`outputs\delaycast\` and the binned cache to `cache\` inside the folder you run from.
+`outputs\delaycast\` and the binned cache to `cache\` inside the folder you run from. `-Population` runs the same
+protocol on **both datasets** with the identity-free population representation (see below; outputs in
+`outputs\delaycast_pop\`, cache in `cache_pop\`).
 
 `cache` prints, per session, how many trials were discovered, kept and dropped (with the reasons), where the lick
 record came from (`Data`: NPZ arrays; `Data2`: the audited log — its NPZ lick arrays are empty on lick trials) and how
@@ -82,8 +84,32 @@ python -m delaycast cache --set data.data_b_root=C:/PythonProject/Rodent/Data2_u
 ```
 
 (`--log-dir` picks up each session's audited log for labels and lick times; set `data.data_b_root` in
-`configs/delaycast.yaml` to the new folder afterwards.) Until then the corpus is the four `Data` sessions, and
-`cross_dataset` transfer is skipped with a warning.
+`configs/delaycast.yaml` to the new folder afterwards.) Until then the **unit-level** corpus is the four `Data`
+sessions, and `cross_dataset` transfer is skipped with a warning.
+
+### Data + Data2 without unit identity: the population representation
+
+What the `Data2` export does preserve is every trial's **population**: the spike counts of the units that fired,
+summed in any way that does not need to know which unit is which. `data.representation: population`
+(`.\scripts\run_delaycast.ps1 -Population`) uses exactly that: in every trial and region the active units are ranked
+by their delay-epoch count, split into `data.population_groups` (8) equal rate-quantile groups, and each group's
+summed counts become one channel — most active group first. A unit's rate rank is a stable property, so channel g
+approximates the same units from trial to trial, and the channels are identical whether a file lists every recorded
+unit (`Data`) or only the ones that fired (`Data2`), in any row order — `cache` verifies this on the three recordings
+present in both trees and prints the fraction of trials with identical channels. The whole corpus — 4 `Data` + 7 non-duplicate
+`Data2` sessions, 11 sessions of 3 animals — goes through the same pipeline: same TCN + Transformer backbone, same
+spectral branch, same forecast head, same cross-dataset transfer, same negative control, same figures and report.
+
+```powershell
+git pull
+.\scripts\run_delaycast.ps1 -Population            # -> outputs\delaycast_pop\REPORT.md, figures, runs
+```
+
+What it can and cannot test: the channels are *not neurons*, so there is nothing to select — every arm uses all
+channels, `select` and Figure 1 are skipped (Figure 2 shows the time-frequency content of all channels) and the report
+marks the unit-level predictions **P1a, P1b, P2, P4, P6 as not applicable**. The temporal (P3), regional (P5a/P5b), spectral (P7) and transfer (P8) predictions, and the negative
+control, are tested on the full 11-session corpus, so they reach the ≥ 5-session rule the four `Data` sessions cannot.
+The unit-level predictions on all 11 sessions still need the NWB re-export above.
 
 ## Commands (real data)
 
@@ -163,6 +189,15 @@ the sum of the head on that token (deep path) and a session-specific linear read
 (wide path, so the model contains the linear decoder); a Poisson decoder forecasts each unit's response-epoch counts
 from the same token plus a persistence path; a causal Gabor filterbank of the gated population rate is the
 spectro-temporal branch.
+
+**Where the spectral and Transformer parts are.** Wavelet analysis (`selection.wavelet`, complex Morlet CWT band power
+over the delay, criterion **W**) is part of the neuron selection and of Figure 2; the in-model counterpart is the causal
+Gabor filterbank on the gated population rate (`model.spectral_branch: bands`, an STFT with a causal Hann window per
+band), whose control is the same filterbank collapsed to the population mean (`popmean`, prediction P7); the two causal
+Transformer blocks (`model.n_transformer_layers: 2`, `model.n_heads`) sit after the TCN and are what the attention
+centre-of-mass and the temporal occlusion of Figure 3 are computed from (the attention map is the last block's; the
+stack has at least one block). All of them are on by default; the `nospec` / `popmean` variants ablate the spectral
+branch, and `model.n_transformer_layers` sets the depth of the Transformer stack.
 
 **Accuracy on the four `Data` sessions** (3 seeds, test trials never used for selection or training; chance ≈ 0.62):
 Left/Right balanced accuracy 0.968 / 0.956 / 0.878 on Sessions 2–4 with ≈ 90–104 selected units out of ≈ 2,000
