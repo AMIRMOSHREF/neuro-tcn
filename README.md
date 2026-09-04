@@ -31,6 +31,25 @@ pip install -e .                     # provides `python -m delaycast` and the `d
 pytest -q tests                      # ~1 min: schema, causality, selection, leakage sentinel on synthetic data
 ```
 
+### Windows / PowerShell quick start
+
+The commands must be run **inside the repository clone** (not inside the data folder), one per line (PowerShell 5
+does not accept `&&`), and the package must be installed once so that `python -m delaycast` exists:
+
+```powershell
+cd C:\PythonProject
+git clone https://github.com/amirmoshref/neuro-tcn.git          # or: cd neuro-tcn ; git pull
+cd C:\PythonProject\neuro-tcn
+git checkout claude/neuro-tcn-rodent-signals-l44cae
+pip install -r requirements.txt
+pip install -e .
+python -m delaycast inspect --npz-detail          # defaults already point at C:/PythonProject/Rodent/Data and /Data2
+python -m delaycast all --quick                   # sanity run, then: python -m delaycast all
+```
+
+`scripts\run_delaycast.ps1` runs the whole protocol step by step (`-Quick` for the sanity run). Outputs go to
+`outputs\delaycast\` and the binned cache to `cache\` inside the folder you run from.
+
 ## Commands (real data)
 
 Point the config at your disks once (defaults are `C:/PythonProject/Rodent/Data` and `.../Data2`), or pass
