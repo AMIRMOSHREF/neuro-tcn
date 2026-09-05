@@ -233,6 +233,67 @@ def cmd_cache(cfg: Config, args) -> None:
         print("\nno session appears in both Data and Data2")
 
 
+def cmd_identity(cfg: Config, args) -> None:
+    """Compare identity-recovery settings on the twin recordings (Data2 sessions that also exist in Data with true
+    unit IDs): every setting re-runs the alignment on the twins and is scored against the true IDs.  Nothing is
+    written to the cache; set `data.identity_features` (and friends) to the best row and rebuild the cache."""
+    from .data.cache import (IDENTITY_SWEEP, _cache_key, build_cache, find_duplicate_sessions, identity_settings, identity_sweep,
+                             representation)
+    if representation(cfg) == "population":
+        print("data.representation=population needs no unit identity; `identity` applies to the units representation.")
+        return
+    caches = build_cache(cfg, force=False)
+    dup = find_duplicate_sessions(caches, keep=str(cfg.data.get_path("duplicate_keep", "A")).upper())
+    if not len(dup):
+        print("no session appears in both Data and Data2: the recovery cannot be validated against true unit IDs.")
+        return
+    settings = None
+    if args.settings:
+        wanted = [w.strip() for w in args.settings.split(";") if w.strip()]
+        known = dict(IDENTITY_SWEEP)
+        settings = []
+        for w in wanted:
+            if w in known:
+                settings.append((w, known[w]))
+            elif w == "configured":
+                settings.append((w, {}))
+            else:
+                feats = tuple(f.strip() for f in w.replace("+", ",").split(",") if f.strip())
+                settings.append((w, {"features": feats}))
+    sessions = [s.strip() for s in args.sessions.split(",") if s.strip()] if args.sessions else None
+    st = identity_settings(cfg)
+    print(f"configured: features {'+'.join(st['features'])}, support {100 * st['support_frac']:g}% (min {st['min_support']}), "
+          f"p_insert {st['p_insert']:g}, prune {st['prune']}; cache key {_cache_key(cfg)}")
+    table = identity_sweep(caches, dup, cfg, settings=settings, sessions=sessions)
+    out = Path(cfg.data.cache_dir) / _cache_key(cfg) / "identity_sweep.csv"
+    table.to_csv(out, index=False)
+    pd.set_option("display.width", 250)
+    if not len(table):
+        print("no twin session matched.")
+        return
+    cols = ["setting", "session_b", "n_slots", "n_slots_added", "n_slots_pruned", "n_slots_merged", "n_true_units_seen", "n_slots_seen",
+            "frac_rows_assigned", "row_accuracy", "row_accuracy_low_rate", "row_accuracy_mid_rate", "row_accuracy_high_rate",
+            "frac_pure_slots", "frac_units_one_slot", "seconds"]
+    print("\nIDENTITY RECOVERY SETTINGS vs THE TRUE IDs OF THE DATA TWINS (row_accuracy = rows whose true unit is their slot's majority "
+          "unit, by rate tercile; frac_pure_slots = slots holding one unit; frac_units_one_slot = units in one slot; "
+          "n_slots vs n_true_units_seen = over-splitting):")
+    print(table[[c for c in cols if c in table.columns]].to_string(index=False, float_format=lambda v: f"{v:.3f}"))
+    summ = table.groupby("setting", sort=False).agg(row_accuracy=("row_accuracy", "mean"), low=("row_accuracy_low_rate", "mean"),
+                                                    mid=("row_accuracy_mid_rate", "mean"), high=("row_accuracy_high_rate", "mean"),
+                                                    pure=("frac_pure_slots", "mean"), one_slot=("frac_units_one_slot", "mean"),
+                                                    slots_per_unit=("n_slots_seen", "sum")).reset_index()
+    summ["slots_per_unit"] = summ.slots_per_unit / table.groupby("setting", sort=False).n_true_units_seen.sum().to_numpy()
+    print("\nMEAN OVER THE TWINS:")
+    print(summ.to_string(index=False, float_format=lambda v: f"{v:.3f}"))
+    print("\ntypical across-trial sd of each fingerprint feature (small = a reliable feature):")
+    for _, r in table.drop_duplicates("setting").iterrows():
+        print(f"  {r.setting}: {r.sd_ref}")
+    best = summ.sort_values("row_accuracy", ascending=False).iloc[0]
+    print(f"\nbest by row accuracy: '{best.setting}' ({best.row_accuracy:.3f}); table: {out}")
+    print("to adopt a setting: --set data.identity_features=<rate,windows,isi subset> (plus data.identity_support_frac / "
+          "identity_p_insert / identity_prune) - the cache key carries the setting, so `cache` rebuilds the Data2 sessions.")
+
+
 def cmd_select(cfg: Config, args) -> None:
     """Descriptive selection on ALL trials (never consumed by `train`, which re-selects on the training split)."""
     from .data.cache import load_cache, representation
@@ -629,6 +690,12 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("cache", help="bin all trials into per-session tensors"); _common(p)
     p.add_argument("--force", action="store_true")
     p.set_defaults(fn=cmd_cache)
+
+    p = sub.add_parser("identity", help="compare unit-identity recovery settings on the twin recordings (true IDs known)"); _common(p)
+    p.add_argument("--settings", default=None, help="';'-separated: names from the built-in sweep, 'configured', or feature lists "
+                                                    "such as rate+windows (default: the built-in sweep + the configured setting)")
+    p.add_argument("--sessions", default=None, help="comma-separated substrings of the twin sessions to check (default all)")
+    p.set_defaults(fn=cmd_identity)
 
     p = sub.add_parser("select", help="descriptive neuron selection on all trials (tables with reasons)"); _common(p)
     p.set_defaults(fn=cmd_select)

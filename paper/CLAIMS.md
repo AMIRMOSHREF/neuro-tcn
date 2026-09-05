@@ -20,11 +20,13 @@ run's Left/Right accuracy by behavioural outcome (hit / miss), because a decoder
 to fail more often on trials in which the animal licked against the instruction.
 
 **Recovered unit identity.** The `Data2` export lost unit IDs but writes each session's units in one fixed order
-minus the silent ones; the cache recovers every row's identity by sequence alignment and validates it on the three
+minus the silent ones; the cache recovers every row's identity by sequence alignment on a per-row fingerprint (trial
+rate, PSTH shape in six task windows, ISI statistics; never the trial label) and validates it on the three
 recordings present in both trees (row accuracy against the true IDs, printed by `cache` and stored in
-`twin_identity_validation.csv`). The seven `Data2`-only sessions therefore enter the unit-level corpus and every
-prediction is tested on 11 sessions; the recovery accuracy on the twins is part of the evidence and must be reported
-next to the verdicts.
+`twin_identity_validation.csv`; `python -m delaycast identity` compares the fingerprint settings on the same twins).
+The seven `Data2`-only sessions therefore enter the unit-level corpus and every prediction is tested on 11
+sessions; the recovery accuracy on the twins is part of the evidence and must be reported next to the verdicts —
+a unit-level verdict is only as good as the identity of the units it was computed on.
 
 **Population representation** (`data.representation: population`, runner switch `-Population`). The alternative
 that needs no identity at all — the seven `Data2`-only sessions enter as identity-free channels: per trial and

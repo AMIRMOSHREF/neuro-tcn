@@ -12,8 +12,15 @@ data:
   cache_dir: "cache"         # binned per-session tensors are stored here (safe to delete)
   recover_identity: true     # exports without unit IDs that list every session's units in one fixed order minus the silent
                              # ones (Data2): recover the identity of every row by sequence alignment (data/identity.py)
-  identity_iterations: 3     # refinement passes of the alignment (slot profiles re-estimated, missing slots added)
-  identity_min_support: 3    # trials that must insert a row at the same place before a new slot is created
+  identity_features: [rate, windows, isi]   # the fingerprint a row is matched on: trial log rate | PSTH shape in six task
+                             # windows | ISI statistics (burstiness, regularity). `python -m delaycast identity` compares
+                             # the settings on the twin recordings against the true IDs
+  identity_iterations: 5     # refinement passes of the alignment (slot profiles re-estimated, missing slots added; 5 passes
+                             # gained ~1.5 points of row accuracy over 3 in simulation at ~40 % more time)
+  identity_min_support: 3    # trials that must insert a row at the same place before a new slot is created ...
+  identity_support_frac: 0.03   # ... at least this fraction of the trials; slots with fewer rows are pruned at the end
+  identity_p_insert: 1.0e-4  # a row is matched to no slot when its best fit is beyond this chi-square tail
+  identity_prune: true       # drop slots seen in fewer than the support trials (alignment accidents, unusable units)
   representation: units      # units: one row per recorded unit (needs unit identity across trials) | population: identity-free
                              # rate-quantile channels per region (works on the Data2 export; unit-level claims not applicable)
   population_groups: 8       # channels per region in the population representation

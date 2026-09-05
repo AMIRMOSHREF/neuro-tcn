@@ -38,6 +38,7 @@ Design decisions and the scientific reason for each
 from __future__ import annotations
 
 import logging
+import re
 import time
 import warnings
 from pathlib import Path
@@ -55,7 +56,7 @@ from matplotlib.ticker import MaxNLocator
 
 from .. import CLASSES, REGION_COLORS, REGION_LABELS, REGIONS
 from ..data.cache import SessionCache
-from ..data.rasters import read_epochs
+from ..data.rasters import read_epochs, resolve_spike_time_reference
 from ..features.spectral import smooth_rates
 from .style import (CLASS_COLORS, EPOCH_COLORS, REGION_SHORT, STABLE_COLOR, STATUS_CODES, STATUS_COLORS,
                     apply_style, small_colorbar, status_cmap)
@@ -96,17 +97,49 @@ def _lick_times(data, key: str) -> np.ndarray:
     return np.asarray(out, dtype=float)
 
 
-def _load_trial(npz_path: Path, cache: SessionCache):
+def _recovered_rows(cfg, cache: SessionCache, npz_path: Path):
+    """Slot index per NPZ row (region -> array) for a session whose identity was recovered by alignment, or None."""
+    if not cfg or (cache.qc_info or {}).get("unit_alignment") != "recovered":
+        return None
+    from ..data.cache import _identity_path
+    from ..data.identity import IdentityMap
+    path = _identity_path(cfg, cache.session)
+    if not path.is_file():
+        warnings.warn(f"{cache.session}: recovered identity map {path} not found; rows shown in positional order", stacklevel=3)
+        return None
+    trial = None
+    if "npz_path" in cache.meta:
+        names = cache.meta.npz_path.astype(str).map(lambda q: Path(q).name)
+        hit = np.flatnonzero(names.to_numpy() == Path(npz_path).name)
+        if hit.size:
+            trial = int(cache.meta.trial.iloc[int(hit[0])])
+    if trial is None:
+        m = re.search(r"trial_?(\d+)", Path(npz_path).stem)
+        trial = int(m.group(1)) if m else None
+    rows = IdentityMap.load(path).rows.get(trial) if trial is not None else None
+    if rows is None:
+        warnings.warn(f"{Path(npz_path).name}: no recovered identity for this trial; rows shown in positional order", stacklevel=3)
+    return rows
+
+
+def _load_trial(npz_path: Path, cache: SessionCache, row_ids: dict | None = None):
     """Spike times of one trial per region, rows aligned to the cache's unit order.
 
-    Alignment is by ``unit_id`` whenever the NPZ carries ids that match the cache (Dataset A); Dataset B has
-    positional ids in both, so the same code path applies.  When the two disagree (a unit dropped mid-session)
-    the figure falls back to positional order with a warning rather than failing - a misaligned row only
-    affects this illustration, never the statistics, which come from the cache.
+    Alignment is by ``unit_id`` whenever the NPZ carries ids that match the cache (Dataset A); for a session whose
+    identity was recovered by alignment (the Data2 export) ``row_ids`` places every NPZ row at its recovered slot.
+    When neither applies (a unit dropped mid-session) the figure falls back to positional order with a warning
+    rather than failing - a misaligned row only affects this illustration, never the statistics, which come from
+    the cache.  Spike times are put on the time base of the epoch scalars (an export may store them relative to
+    the trial start).
     """
     data = np.load(npz_path, allow_pickle=True)
     ep = read_epochs(data)
     by_region = _spikes_by_region(data)
+    if np.isfinite(ep["delay_start_times"]) and np.isfinite(ep["go_start_times"]):
+        try:
+            by_region, _ = resolve_spike_time_reference(by_region, ep, (ep["delay_start_times"] - 3.0, ep["go_start_times"] + 3.0), npz_path)
+        except ValueError as e:
+            warnings.warn(str(e), stacklevel=2)
     spikes: dict[str, list[np.ndarray]] = {}
     for r in REGIONS:
         raw, ids = by_region[r]
@@ -115,7 +148,14 @@ def _load_trial(npz_path: Path, cache: SessionCache):
         cache_ids = [x.item() if hasattr(x, "item") else x for x in np.asarray(cache.unit_ids[r]).ravel()]
         n_cache = int(cache.n_units[r])
         aligned = False
-        if len(st) == n_cache and len(cache_ids) == n_cache and len(set(ids)) == n_cache and set(ids) == set(cache_ids):
+        slots = None if row_ids is None else row_ids.get(r)
+        if slots is not None and len(slots) == len(st):
+            placed = [np.empty(0)] * n_cache
+            for i, k in enumerate(np.asarray(slots, dtype=int)):
+                if 0 <= k < n_cache:
+                    placed[k] = st[i]
+            st, aligned = placed, True
+        elif len(st) == n_cache and len(cache_ids) == n_cache and len(set(ids)) == n_cache and set(ids) == set(cache_ids):
             pos = {uid: i for i, uid in enumerate(ids)}
             st = [st[pos[uid]] for uid in cache_ids]
             aligned = True
@@ -668,7 +708,7 @@ def plot_raster_selection(npz_path, cache: SessionCache, table: pd.DataFrame, cf
     if "rank" not in table.columns:
         table["rank"] = np.nan
 
-    spikes, ep, licks = _load_trial(npz_path, cache)
+    spikes, ep, licks = _load_trial(npz_path, cache, row_ids=_recovered_rows(cfg, cache, npz_path))
     t0 = ep["delay_start_times"]
     go = ep["go_start_times"]
     if not (np.isfinite(t0) and np.isfinite(go)):

@@ -72,15 +72,25 @@ session's units in **one fixed order** and merely omits the silent ones (order c
 every row identified by its spike train). A trial's row list is therefore a subsequence of one master unit list per
 region, and `cache` recovers the identity of every row by sequence alignment (`data.recover_identity`,
 `src/delaycast/data/identity.py`): the master list starts as the trial with the most rows, every trial is aligned to
-it by a monotone dynamic programme whose match score is the row's log firing rate against the slot's rate profile
-(a unit keeps its rate from trial to trial), skipped slots cost the unit's probability of being silent, slots are
-added where enough trials insert a row at the same place, and slots that are never co-assigned in a trial are merged
-back. The recovered slots are unit IDs in every sense the cache needs. On the twin recordings `cache` prints the
-accuracy of the recovery against the true IDs (`row_accuracy`, split by the unit's rate tercile; the sparsest units
-are the hardest to align and the least likely to pass the selection floor) — that table is the evidence for using
-the recovery on the seven `Data2`-only sessions, which therefore enter the **unit-level** corpus:
+it by a monotone dynamic programme, skipped slots cost the unit's probability of being silent, slots are added where
+enough trials insert a consistent row at the same place, slots seen in too few trials are pruned, and slots that are
+never co-assigned in a trial are merged back. The match score is a row's **fingerprint** against the slot's profile:
+the trial log rate, the PSTH *shape* (log rate in six task windows — pre-sample, sample, early / late delay, early /
+late response — relative to the trial rate, so a delay-ramping and a go-responsive unit of the same mean rate are
+told apart while a trial-wide gain moves only the rate) and two ISI statistics (burstiness, regularity), scored as a
+Gaussian with per-slot means / sds and one pooled correlation matrix (`data.identity_features`, default
+`[rate, windows, isi]`). The recovered slots are unit IDs in every sense the cache needs. On the twin recordings
+`cache` prints the accuracy of the recovery against the true IDs (`row_accuracy`, split by the unit's rate tercile;
+the sparsest units are the hardest to align and the least likely to pass the selection floor) — that table is the
+evidence for using the recovery on the seven `Data2`-only sessions, which therefore enter the **unit-level** corpus:
 `.\scripts\run_delaycast.ps1` now runs on all 11 sessions. The first `cache` costs a few minutes per `Data2`
-session (the alignment, cached under `cache\<key>\identity\`).
+session (the alignment, cached under `cache\<key>\identity\`; the cache key carries the recovery settings).
+
+`python -m delaycast identity` (or `.\scripts\run_delaycast.ps1 -IdentitySweep`) re-runs the recovery on the twin
+recordings under several settings — rate only, rate + shape, rate + shape + ISI, stricter slot creation, looser
+insertion, no pruning — and prints their accuracy against the true IDs (`identity_sweep.csv`): the row to adopt is
+the one with the highest `row_accuracy` (`--set data.identity_features=...`, `data.identity_support_frac`,
+`data.identity_p_insert`, `data.identity_prune`; `cache` then rebuilds the `Data2` sessions).
 
 The NWB re-export below remains the exact alternative (unit IDs from the source file).
 

@@ -5,6 +5,7 @@ DelayCAST v2 - full protocol on Windows / PowerShell.
     .\scripts\run_delaycast.ps1 -Quick     # one seed, within-session only (sanity run)
     .\scripts\run_delaycast.ps1 -DataA D:\Rodent\Data -DataB D:\Rodent\Data2
     .\scripts\run_delaycast.ps1 -Population   # Data + Data2 as identity-free population channels -> outputs/delaycast_pop
+    .\scripts\run_delaycast.ps1 -IdentitySweep   # cache, then score the identity-recovery settings on the twins and stop
 
 Run it from the repository folder after `pip install -e .` (see README "Windows / PowerShell quick start").
 Every step is a separate `python -m delaycast ...` call, so a failed step can be rerun on its own.
@@ -17,6 +18,7 @@ param(
     [string]$Seeds = "0,1,2",
     [switch]$Quick,
     [switch]$Population,      # identity-free population channels: Data + Data2 (11 sessions), outputs/delaycast_pop
+    [switch]$IdentitySweep,   # after `cache`: compare the identity-recovery settings on the twin recordings (true IDs) and stop
     [int]$Groups = 8          # with -Population: rate-quantile channels per region (8; try 32 or 64 - finer groups keep more
                               # of the single-unit information, the top-ranked channels become near-identities)
 )
@@ -43,6 +45,7 @@ function Step([string]$name, [string[]]$cmdArgs) {
 
 Step "inspect" (@("inspect", "--npz-detail") + $common)
 Step "cache"   (@("cache") + $common)
+if ($IdentitySweep) { Step "identity" (@("identity") + $common); return }
 Step "select"  (@("select") + $common)
 # Population representation: the channels are not neurons, so the rate/random arms and the linonly/noskip
 # ablations would train on identical inputs - only the criteria arm and its spectral control are run.

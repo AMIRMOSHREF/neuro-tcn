@@ -136,7 +136,7 @@ def _csv_flags(rec: TrialRecord, cfg) -> tuple[bool, str]:
     return True, ""
 
 
-LOADER_VERSION = 5
+LOADER_VERSION = 6
 """Bumped on EVERY change of the trial loader / QC rules: it is part of the cache key, so an old cache can never be
 read by a newer loader (v2: unit alignment by ID, log lick times, miss trials kept; v3: empty NPZ lick arrays defer to
 the log, sessions without unit identity excluded)."""
@@ -144,6 +144,27 @@ the log, sessions without unit identity excluded)."""
 
 def _identity_path(cfg, session: str) -> Path:
     return Path(cfg.data.cache_dir) / _cache_key(cfg) / "identity" / (session.replace("/", "__") + ".pkl")
+
+
+def identity_settings(cfg) -> dict:
+    """Keyword arguments of ``recover_session_identity`` from ``data.identity_*`` (features: rate / windows / isi)."""
+    from .identity import FEATURE_SETS
+    feats = cfg.data.get_path("identity_features", list(FEATURE_SETS))
+    if isinstance(feats, str):
+        feats = [f.strip() for f in feats.replace("+", ",").split(",") if f.strip()]
+    return {"features": tuple(str(f).lower() for f in feats),
+            "n_iter": int(cfg.data.get_path("identity_iterations", 5)),
+            "min_support": int(cfg.data.get_path("identity_min_support", 3)),
+            "support_frac": float(cfg.data.get_path("identity_support_frac", 0.03)),
+            "p_insert": float(cfg.data.get_path("identity_p_insert", 1e-4)),
+            "prune": bool(cfg.data.get_path("identity_prune", True))}
+
+
+def identity_tag(cfg) -> str:
+    """Short cache-key tag of the identity settings (a different recovery is a different cache)."""
+    st = identity_settings(cfg)
+    return (f"id{''.join(f[0] for f in st['features'])}s{100 * st['support_frac']:g}p{-np.log10(st['p_insert']):g}"
+            + ("" if st["prune"] else "np"))
 
 
 def _recover_identity(cfg, session: str, recs):
@@ -155,9 +176,10 @@ def _recover_identity(cfg, session: str, recs):
             return IdentityMap.load(path)
         except Exception:  # pragma: no cover
             pass
-    log.info("%s: recovering unit identity by sequence alignment over %d trials ...", session, len(recs))
-    ident = recover_session_identity(recs, n_iter=int(cfg.data.get_path("identity_iterations", 3)),
-                                     min_support=int(cfg.data.get_path("identity_min_support", 3)), session=session)
+    st = identity_settings(cfg)
+    log.info("%s: recovering unit identity by sequence alignment over %d trials (features %s) ...", session, len(recs),
+             "+".join(st["features"]))
+    ident = recover_session_identity(recs, session=session, **st)
     ident.save(path)
     return ident
 
@@ -178,7 +200,60 @@ def twin_identity_validation(caches: list, dup: pd.DataFrame, cfg, records=None)
         ident = IdentityMap.load(path)
         acc = twin_identity_accuracy(ident, by_session[d.session_b], by_session[d.session_a])
         rows.append({"session_b": d.session_b, "n_slots": ident.stats.get("n_slots_total"),
-                     "frac_rows_assigned": ident.stats.get("frac_rows_assigned"), **acc})
+                     "n_slots_added": ident.stats.get("n_slots_added"), "n_slots_pruned": ident.stats.get("n_slots_pruned", 0),
+                     "n_slots_merged": ident.stats.get("n_slots_merged", 0), **acc})
+    return pd.DataFrame(rows)
+
+
+# Recovery settings compared by `delaycast identity` on the twin recordings (label -> overrides of identity_settings).
+IDENTITY_SWEEP = [
+    ("rate", {"features": ("rate",)}),
+    ("rate+windows", {"features": ("rate", "windows")}),
+    ("rate+windows+isi", {"features": ("rate", "windows", "isi")}),
+    ("rate+windows+isi, support 5%", {"features": ("rate", "windows", "isi"), "support_frac": 0.05}),
+    ("rate+windows+isi, p_insert 1e-3", {"features": ("rate", "windows", "isi"), "p_insert": 1e-3}),
+    ("rate+windows+isi, no prune", {"features": ("rate", "windows", "isi"), "prune": False}),
+]
+
+
+def identity_sweep(caches: list, dup: pd.DataFrame, cfg, records=None, settings=None, sessions=None) -> pd.DataFrame:
+    """Recover the identity of every Data2 twin under several settings and score each against the true IDs of the
+    Data copy (``twin_identity_accuracy``) - the table that decides which fingerprint the recovery should use.
+
+    ``settings``: list of ``(label, overrides)`` (default ``IDENTITY_SWEEP`` plus the configured setting);
+    ``sessions``: substrings selecting the twin sessions (default all).  Nothing is written to the cache."""
+    from .identity import recover_session_identity, twin_identity_accuracy
+    if records is None:
+        records = discover_all(cfg)
+    by_session: dict[str, list] = {}
+    for r in records:
+        by_session.setdefault(r.session, []).append(r)
+    base = identity_settings(cfg)
+    if settings is None:
+        settings = list(IDENTITY_SWEEP)
+        if all(dict(base, **ov) != base for _, ov in settings):
+            settings.append(("configured", {}))
+    rows = []
+    for _, d in dup.iterrows():
+        if d.session_a not in by_session or d.session_b not in by_session:
+            continue
+        if sessions and not any(s in d.session_b for s in sessions):
+            continue
+        recs_b = sorted(by_session[d.session_b], key=lambda x: x.trial)
+        for label, ov in settings:
+            st = dict(base, **ov)
+            log.info("%s: identity sweep '%s' (%s) ...", d.session_b, label, ", ".join(f"{k}={v}" for k, v in st.items()))
+            ident = recover_session_identity(recs_b, session=d.session_b, **st)
+            acc = twin_identity_accuracy(ident, recs_b, by_session[d.session_a])
+            per = ident.stats.get("per_region", {})
+            sd_ref = {}
+            for r in REGIONS:
+                for k, v in (per.get(r, {}).get("sd_ref") or {}).items():
+                    sd_ref.setdefault(k, []).append(v)
+            rows.append({"setting": label, "session_b": d.session_b, "n_slots": ident.stats.get("n_slots_total"),
+                         "n_slots_added": ident.stats.get("n_slots_added"), "n_slots_pruned": ident.stats.get("n_slots_pruned", 0),
+                         "n_slots_merged": ident.stats.get("n_slots_merged", 0), "seconds": ident.stats.get("seconds"), **acc,
+                         "sd_ref": " ".join(f"{k.replace('log_rate', 'rate').replace('shape_', 's_').replace('isi_', 'i_')}={np.mean(v):.2f}" for k, v in sd_ref.items())})
     return pd.DataFrame(rows)
 
 
@@ -197,6 +272,8 @@ def _cache_key(cfg) -> str:
            f"_resp{c.target.response_ms}_v{LOADER_VERSION}")
     if representation(cfg) == "population":
         key += f"_pop{int(c.get_path('population_groups', 8))}"
+    elif bool(c.get_path("recover_identity", True)):
+        key += "_" + identity_tag(cfg)
     return key
 
 

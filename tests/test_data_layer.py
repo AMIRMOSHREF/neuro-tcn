@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+import warnings
 import pywt
 from scipy import stats as ss
 
@@ -1079,3 +1080,102 @@ def test_identity_is_recovered_by_alignment_for_an_export_without_ids(tmp_path, 
     # the recovered rasters carry the same spikes as the Data copy, unit for unit (matched by slot label)
     a = next(c for c in caches if c.dataset == "A")
     assert a.context["ALM_L"].astype(int).sum() == b.context["ALM_L"].astype(int).sum()
+
+
+def test_identity_fingerprint_features_and_alignment():
+    """Row fingerprints: trial log rate, PSTH shape relative to it, ISI statistics only with enough spikes; the
+    alignment assigns rows to strictly increasing slots, skips silent slots and inserts a row that fits nothing."""
+    from delaycast.data.identity import (align_rows, feature_floors, feature_names, insertion_penalty, row_features,
+                                         score_matrix, trial_windows)
+    ep = {"trial_start": 10.0, "trial_stop": 15.0, "sample_start_times": 11.0, "delay_start_times": 11.65, "go_start_times": 12.85}
+    (t0, t1), wins = trial_windows(ep)
+    assert (t0, t1) == (10.0, 15.0) and wins[0] == (10.0, 11.0) and wins[-1][1] == 15.0
+    names = feature_names(("rate", "windows", "isi"))
+    assert names[0] == "log_rate" and names[1].startswith("shape_") and len(names) == 9
+    assert feature_names(("windows",))[0].startswith("log_rate_") and list(feature_floors(names)[-2:]) == [0.15, 0.15]
+    with pytest.raises(ValueError):
+        feature_names(("rate", "waveform"))
+    dense = 10.0 + np.arange(0.05, 5.0, 0.05)                      # 20 Hz regular unit over the whole trial
+    delay_only = 11.7 + np.sort(np.random.default_rng(3).uniform(0, 1.1, 12))   # fires in the delay only, irregularly
+    sparse = np.array([12.0, 13.0])                                # two spikes: no ISI statistics
+    F = row_features([dense, delay_only, sparse], ep, ("rate", "windows", "isi"))
+    assert F.shape == (3, 9) and np.isfinite(F[0]).all()
+    assert F[0, 0] == pytest.approx(np.log1p(len(dense) / 5.0))
+    assert abs(F[0, 1:7]).max() < 0.2                              # flat PSTH: shape ~ 0 everywhere
+    assert F[1, 3] > 1.0 and F[1, 1] < -0.5                        # delay-only unit: high in delay_early, low pre-sample
+    assert np.isnan(F[2, 7:]).all() and np.isfinite(F[2, :7]).all()
+    assert F[0, 8] < F[1, 8] - 0.5                                  # regular train: lower ISI CV than a Poisson-like one
+    # alignment: 3 slots with rates 0.5 / 2.0 / 4.0 (log1p), rows [2.0, 4.0] -> slots 1, 2 (slot 0 skipped)
+    mu = np.array([[0.5], [2.0], [4.0]]); sd = np.full((3, 1), 0.3); sd_ref = np.array([0.3])
+    pabs = np.array([0.3, 0.1, 0.1])
+    S, ins = score_matrix(np.array([[2.0], [4.0]]), mu, sd, sd_ref, np.log1p(-pabs), None, 1e-4)
+    assert ins.shape == (2,) and ins[0] == pytest.approx(insertion_penalty(1, 1e-4))
+    a, _ = align_rows(S, np.log(pabs), ins)
+    assert list(a) == [1, 2]
+    # a row far from every slot is inserted, the others still align
+    S, ins = score_matrix(np.array([[0.5], [9.0], [4.0]]), mu, sd, sd_ref, np.log1p(-pabs), None, 1e-4)
+    a, _ = align_rows(S, np.log(pabs), ins)
+    assert list(a) == [0, -1, 2]
+    # a missing feature costs its expectation and lowers the insertion threshold accordingly
+    S2, ins2 = score_matrix(np.array([[2.0, np.nan]]), np.hstack([mu, mu]), np.full((3, 2), 0.3), np.array([0.3, 0.3]), np.log1p(-pabs), None, 1e-4)
+    assert ins2[0] == pytest.approx(insertion_penalty(1, 1e-4) - 0.5)
+
+
+def test_identity_recovery_is_robust_to_correlated_fingerprints():
+    """A trial-wide gain moves every rate feature of a unit together; with the pooled correlation the correct
+    rows are not rejected and no spurious slots appear (they did with independent features)."""
+    from delaycast.data.identity import feature_floors, feature_names, recover_region, row_features
+    rng = np.random.default_rng(5)
+    n_units, n_trials = 60, 40
+    base = np.exp(rng.normal(np.log(3.0), 0.8, n_units))
+    prof = np.exp(rng.normal(0, 0.5, (n_units, 6)))
+    edges = [10.0, 11.0, 11.65, 12.25, 12.85, 13.45, 14.85]
+    ep = {"trial_start": 10.0, "trial_stop": 14.85, "sample_start_times": 11.0, "delay_start_times": 11.65, "go_start_times": 12.85}
+    X, truth = [], []
+    for t in range(n_trials):
+        gain = np.exp(rng.normal(0, 0.6, n_units))
+        rows, ids = [], []
+        for u in range(n_units):
+            sp = []
+            for w in range(6):
+                n = rng.poisson(base[u] * prof[u, w] * gain[u] * (edges[w + 1] - edges[w]))
+                sp += list(rng.uniform(edges[w], edges[w + 1], n))
+            if sp:
+                rows.append(np.sort(sp)); ids.append(u)
+        X.append(row_features(rows, ep, ("rate", "windows", "isi"))); truth.append(np.array(ids))
+    assigns, st = recover_region(X, floors=feature_floors(feature_names(("rate", "windows", "isi"))))
+    assert st["frac_rows_assigned"] > 0.98 and abs(st["n_slots"] - n_units) <= 2, st
+    votes: dict[int, dict[int, int]] = {}
+    for a, ids in zip(assigns, truth):
+        for s, u in zip(a, ids):
+            if s >= 0:
+                votes.setdefault(int(s), {}).setdefault(int(u), 0)
+                votes[int(s)][int(u)] += 1
+    acc = sum(max(v.values()) for v in votes.values()) / sum(sum(v.values()) for v in votes.values())
+    assert acc > 0.95, acc
+
+
+def test_identity_sweep_scores_settings_on_the_twin_and_figure1_uses_the_recovered_rows(tmp_path):
+    """`identity` compares fingerprints on the twin without touching the cache, and Figure 1 places the rows of a
+    recovered session at their slots (no positional-order warning, spikes on the epoch time base)."""
+    from delaycast.data.cache import find_duplicate_sessions, identity_sweep
+    from delaycast.features.selection import select_neurons
+    from delaycast.figures.raster_selection import plot_raster_selection
+
+    rng = np.random.default_rng(23)
+    n = {"ALM_L": 10, "ALM_R": 8, "STR_L": 8, "STR_R": 6}
+    _fixed_order_twin(tmp_path, rng, n)
+    cfg = _cfg(tmp_path)
+    caches = build_cache(cfg, force=True)
+    dup = find_duplicate_sessions(caches)
+    sweep = identity_sweep(caches, dup, cfg, settings=[("rate", {"features": ("rate",)}), ("configured", {})])
+    assert list(sweep.setting) == ["rate", "configured"] and (sweep.row_accuracy >= 0.9).all()
+    assert {"n_slots_pruned", "sd_ref", "seconds", "frac_rows_assigned"} <= set(sweep.columns)
+    b = next(c for c in caches if c.dataset == "B")
+    tab = select_neurons(b, cfg, seed=0).table
+    ti = int(np.flatnonzero(b.labels == 1)[0])
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        out = plot_raster_selection(Path(b.meta.npz_path.iloc[ti]), b, tab, cfg, tmp_path / "fig1_recovered.png", trial_label="twin trial")
+    assert out.is_file()
+    assert not [x for x in w if "positional order" in str(x.message)], [str(x.message) for x in w]

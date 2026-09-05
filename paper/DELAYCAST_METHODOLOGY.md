@@ -57,15 +57,26 @@ the upcoming action** — and whether that answer is the same across recordings.
   recordings) has its identity recovered by sequence alignment before anything else. Per region, the master slot
   list starts as the trial with the most rows; every trial is aligned to it by a monotone dynamic programme (a
   profile alignment: rows assigned to strictly increasing slots, a skipped slot costs the log-probability that the
-  unit is silent, a row that fits no slot costs a fixed insertion penalty, the match score is a Gaussian on the
-  row's log firing rate against the slot's rate profile); slot profiles are re-estimated from the assignments,
-  slots are added where at least 3 % of the trials insert a row at the same place, and adjacent slots that are
-  never co-assigned in a trial are merged (a split unit). The recovered slots are the unit IDs of the session. On
-  the twin recordings the recovery is scored against the true IDs (`row_accuracy`, by rate tercile;
-  `frac_units_one_slot`), and `cache` prints that table — the sparsest units are the hardest to align and the
-  least likely to pass the selection floor. Simulations (400 units, 300 trials, 10 % silent per trial, 0.3
-  log-normal rate jitter): row accuracy 0.90 / 0.98 / 1.00 for the low / mid / high rate terciles, 98 % of units in
-  one slot.
+  unit is silent, a row that fits no slot is inserted). The match score is the row's *fingerprint* against the
+  slot's profile: the trial log rate (`rate`), the PSTH shape — log rate in six task windows (pre-sample, sample,
+  early / late delay, early / late response) relative to the trial rate (`windows`) — and two ISI statistics,
+  median-over-mean ISI and log ISI CV (`isi`; `data.identity_features`), as a Gaussian with per-slot means and
+  sds (shrunk toward the typical slot sd of the feature) and one pooled correlation matrix shared by all slots —
+  the features are not independent (compositional shape, the two ISI measures, a trial-wide gain), and with an
+  independent-feature score the correct rows had a far heavier tail than chi-square and were rejected; a row is
+  inserted when its best fit is beyond the 1 − `identity_p_insert` chi-square quantile of the features it has, a
+  missing statistic contributing its expectation. Slot profiles are re-estimated after every pass, slots are
+  added where at least `identity_support_frac` of the trials insert a consistent row at the same place (never from
+  the first pass, whose master is one trial), slots with fewer rows than that are pruned, and adjacent slots that
+  are never co-assigned in a trial and share a profile are merged (a split unit; the profile test is looser when
+  the two are populated enough that independent units would have co-occurred). The recovery never uses the trial
+  label. The recovered slots are the unit IDs of the session. On the twin recordings the recovery is scored
+  against the true IDs (`row_accuracy`, by rate tercile; `frac_units_one_slot`), `cache` prints that table and
+  `python -m delaycast identity` re-scores the fingerprint settings side by side — the sparsest units are the
+  hardest to align and the least likely to pass the selection floor. Simulation at the real scale (400 units,
+  300 trials, log-normal rates centred at 0.6 Hz with sd 0.9, trial-wide log-normal gain sd 0.7, task-modulated
+  and selective PSTHs, bursty / regular / Poisson trains, 5 % of units silent per trial): rate alone 0.88 row
+  accuracy, the full fingerprint 0.94 (0.92 / 0.94 / 0.96 by rate tercile), 95–98 % of units in one slot.
 * **Population representation** (`data.representation: population`, `data.population_groups` = 8): the alternative
   that needs no identity. Per trial and region, the units with at least one spike in the context or target window
   are ranked by their delay-epoch count (ties broken by the full count vector, so the ranking is a function of the
