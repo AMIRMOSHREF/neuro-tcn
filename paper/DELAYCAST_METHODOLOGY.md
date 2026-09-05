@@ -75,8 +75,9 @@ the upcoming action** — and whether that answer is the same across recordings.
   `python -m delaycast identity` re-scores the fingerprint settings side by side — the sparsest units are the
   hardest to align and the least likely to pass the selection floor. Simulation at the real scale (400 units,
   300 trials, log-normal rates centred at 0.6 Hz with sd 0.9, trial-wide log-normal gain sd 0.7, task-modulated
-  and selective PSTHs, bursty / regular / Poisson trains, 5 % of units silent per trial): rate alone 0.88 row
-  accuracy, the full fingerprint 0.94 (0.92 / 0.94 / 0.96 by rate tercile), 95–98 % of units in one slot.
+  and selective PSTHs, bursty / regular / Poisson trains, 5 % of units silent per trial, five passes): rate alone
+  0.90 row accuracy, the full fingerprint 0.95 (0.92 / 0.95 / 0.97 by rate tercile), 95–99 % of units in one slot
+  and no surplus slots.
 * **Population representation** (`data.representation: population`, `data.population_groups` = 8): the alternative
   that needs no identity. Per trial and region, the units with at least one spike in the context or target window
   are ranked by their delay-epoch count (ties broken by the full count vector, so the ranking is a function of the
