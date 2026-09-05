@@ -136,10 +136,50 @@ def _csv_flags(rec: TrialRecord, cfg) -> tuple[bool, str]:
     return True, ""
 
 
-LOADER_VERSION = 4
+LOADER_VERSION = 5
 """Bumped on EVERY change of the trial loader / QC rules: it is part of the cache key, so an old cache can never be
 read by a newer loader (v2: unit alignment by ID, log lick times, miss trials kept; v3: empty NPZ lick arrays defer to
 the log, sessions without unit identity excluded)."""
+
+
+def _identity_path(cfg, session: str) -> Path:
+    return Path(cfg.data.cache_dir) / _cache_key(cfg) / "identity" / (session.replace("/", "__") + ".pkl")
+
+
+def _recover_identity(cfg, session: str, recs):
+    """Recovered identity map of one session, from disk when it exists (keyed with the cache)."""
+    from .identity import IdentityMap, recover_session_identity
+    path = _identity_path(cfg, session)
+    if path.is_file():
+        try:
+            return IdentityMap.load(path)
+        except Exception:  # pragma: no cover
+            pass
+    log.info("%s: recovering unit identity by sequence alignment over %d trials ...", session, len(recs))
+    ident = recover_session_identity(recs, n_iter=int(cfg.data.get_path("identity_iterations", 3)),
+                                     min_support=int(cfg.data.get_path("identity_min_support", 3)), session=session)
+    ident.save(path)
+    return ident
+
+
+def twin_identity_validation(caches: list, dup: pd.DataFrame, cfg, records=None) -> pd.DataFrame:
+    """Recovered-identity accuracy of every Data2 twin against its Data copy (see identity.twin_identity_accuracy)."""
+    from .identity import IdentityMap, twin_identity_accuracy
+    if records is None:
+        records = discover_all(cfg)
+    by_session: dict[str, list] = {}
+    for r in records:
+        by_session.setdefault(r.session, []).append(r)
+    rows = []
+    for _, d in dup.iterrows():
+        path = _identity_path(cfg, d.session_b)
+        if not path.is_file() or d.session_a not in by_session or d.session_b not in by_session:
+            continue
+        ident = IdentityMap.load(path)
+        acc = twin_identity_accuracy(ident, by_session[d.session_b], by_session[d.session_a])
+        rows.append({"session_b": d.session_b, "n_slots": ident.stats.get("n_slots_total"),
+                     "frac_rows_assigned": ident.stats.get("frac_rows_assigned"), **acc})
+    return pd.DataFrame(rows)
 
 
 def representation(cfg) -> str:
@@ -251,10 +291,24 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
         recs = sorted(recs, key=lambda x: x.trial)
         pop = representation(cfg) == "population"
         n_groups = int(cfg.data.get_path("population_groups", 8))
+        ident = None
         if pop:   # identity-free channels: no unit universe, no positional identity, nothing to align
             unit_index, align_info = None, {"unit_alignment": "population", "unit_alignment_note": f"{n_groups} rate-quantile channels per region"}
         else:
             unit_index, align_info = _unit_universe(recs)
+            if unit_index is None and bool(cfg.data.get_path("recover_identity", True)) and len(recs) >= 10:
+                # No usable unit IDs (the Data2 export): recover them by sequence alignment - the export lists
+                # every session's units in one fixed order minus the silent ones (see data/identity.py).
+                ident = _recover_identity(cfg, sess, recs)
+                unit_index = {r: np.arange(ident.n_slots[r], dtype=np.int64) for r in REGIONS}
+                align_info = {"unit_alignment": "recovered", "units_union": int(ident.stats["n_slots_total"]),
+                              "units_per_trial_min": int(min(len(v[REGIONS[0]]) for v in ident.rows.values())) if ident.rows else 0,
+                              "units_per_trial_max": int(max(len(v[REGIONS[0]]) for v in ident.rows.values())) if ident.rows else 0,
+                              "unit_alignment_note": (f"identity recovered by sequence alignment: {ident.stats['n_slots_total']} slots "
+                                                      f"({ident.stats['n_slots_added']} added beyond the longest trial), "
+                                                      f"{100 * ident.stats['frac_rows_assigned']:.1f}% of rows assigned"),
+                              "identity_stats": ident.stats}
+                log.info("%s: %s", sess, align_info["unit_alignment_note"])
         if unit_index is not None and align_info["units_per_trial_min"] < align_info["units_union"]:
             log.info("%s: units aligned by ID; %d units in the session, %d-%d present per trial (absent units = silent, zero rows)",
                      sess, align_info["units_union"], align_info["units_per_trial_min"], align_info["units_per_trial_max"])
@@ -271,7 +325,10 @@ def build_cache(cfg, force: bool = False) -> list[SessionCache]:
         for rec in tqdm(recs, desc=f"binning {sess}", leave=False):
             keep, reason = _csv_flags(rec, cfg)
             try:
-                tr = load_trial_rasters(rec.npz_path, cfg, metadata=rec.csv, unit_index=unit_index)
+                if ident is not None and int(rec.trial) not in ident.rows:
+                    raise ValueError("no recovered identity for this trial (unreadable during recovery)")
+                tr = load_trial_rasters(rec.npz_path, cfg, metadata=rec.csv, unit_index=unit_index,
+                                        row_ids=ident.rows[int(rec.trial)] if ident is not None else None)
                 if pop:
                     tr = population_rasters(tr, n_groups)
             except Exception as e:  # corrupted / incomplete NPZ
@@ -680,6 +737,9 @@ def cache_summary(caches: list[SessionCache]) -> pd.DataFrame:
         reasons = qi.get("drop_reasons", {}) or {}
         row["drop_reasons"] = ", ".join(f"{k}:{v}" for k, v in sorted(reasons.items(), key=lambda kv: -kv[1])) or "-"
         row["align"] = str(qi.get("unit_alignment", "?"))
+        if qi.get("unit_alignment") == "recovered" and qi.get("identity_stats"):
+            st = qi["identity_stats"]
+            row["align"] += f" ({st.get('n_slots_total')} slots, {100 * float(st.get('frac_rows_assigned', float('nan'))):.1f}% rows)"
         if qi.get("units_pooled"):
             row["align"] += " (" + "/".join(str(v) for v in qi["units_pooled"].values()) + " units pooled)"
         refs = qi.get("spike_time_references", {}) or {}

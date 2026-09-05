@@ -177,13 +177,14 @@ def _npz_detail(recs) -> None:
         ids_ok = notes == {"ok"}
         print(f"  units in the first {len(counts)} trials of {rec.session}: {counts} -> "
               + ("count varies per trial; " + ("rows are aligned by unit ID (absent units = zero rows)" if ids_ok
-                 else f"units CANNOT be aligned by ID ({', '.join(sorted(notes - {'ok'}))}): only trials with the first trial's unit count are kept") if varies
+                 else f"no usable unit IDs ({', '.join(sorted(notes - {'ok'}))}): `cache` recovers the identity of every row by "
+                      "sequence alignment (data.recover_identity; the export lists units in one fixed order minus the silent ones)") if varies
                  else "constant" + ("" if ids_ok else f" (no ID alignment: {', '.join(sorted(notes - {'ok'}))})")))
 
 
 def cmd_cache(cfg: Config, args) -> None:
     from .data.cache import (_cache_key, build_cache, cache_summary, duplicate_channel_agreement, excluded_sessions,
-                             find_duplicate_sessions, representation, twin_unit_order_check)
+                             find_duplicate_sessions, representation, twin_identity_validation, twin_unit_order_check)
     caches = build_cache(cfg, force=args.force)
     pd.set_option("display.width", 250)
     summ = cache_summary(caches)
@@ -221,6 +222,13 @@ def cmd_cache(cfg: Config, args) -> None:
               "order_consistency = the same relative order from trial to trial (1.0: one fixed order per session -> identity "
               "recoverable by sequence alignment; ~0.5: re-drawn per trial); rho_pos_vs_*: what the rows are sorted by):")
         print(order.to_string(index=False))
+        if representation(cfg) != "population":
+            val = twin_identity_validation(caches, dup, cfg)
+            if len(val):
+                val.to_csv(Path(cfg.data.cache_dir) / _cache_key(cfg) / "twin_identity_validation.csv", index=False)
+                print("\nRECOVERED UNIT IDENTITY vs THE TRUE IDs OF THE DATA TWIN (row_accuracy = rows whose true unit is their slot's "
+                      "majority unit; frac_pure_slots = slots holding one unit only; frac_units_one_slot = units that map to one slot):")
+                print(val.to_string(index=False))
     else:
         print("\nno session appears in both Data and Data2")
 

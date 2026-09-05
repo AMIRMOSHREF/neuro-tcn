@@ -48,9 +48,24 @@ the upcoming action** — and whether that answer is the same across recordings.
   `unit_ids` and `brain_region` of different length) identity is positional and a trial whose unit count differs from
   the first kept trial's is dropped; when that happens in more than 20 % of a session's trials the session is
   **excluded** (`unit_identity_unavailable`) because its export lost unit identity — the `Data2` trial files are of
-  this kind (units that fired in the trial only, no IDs) and must be re-exported from NWB with the `Data` schema
-  (`scripts/export_nwb_trials.py`); `cache` prints the reason and the fix. The cache JSON records the alignment mode and how many units each
+  this kind (units that fired in the trial only, no IDs); with `data.recover_identity` (default) their identity is
+  recovered by alignment (next bullet) and the exclusion applies only when recovery is switched off — the NWB
+  re-export (`scripts/export_nwb_trials.py`) stays the exact alternative; `cache` prints the reason and the fix. The cache JSON records the alignment mode and how many units each
   trial contributed versus the union.
+* **Identity recovery** (`data.recover_identity`): an export without IDs that lists every session's units in one
+  fixed order minus the silent ones (the `Data2` files: order consistency 0.998 across trials on the twin
+  recordings) has its identity recovered by sequence alignment before anything else. Per region, the master slot
+  list starts as the trial with the most rows; every trial is aligned to it by a monotone dynamic programme (a
+  profile alignment: rows assigned to strictly increasing slots, a skipped slot costs the log-probability that the
+  unit is silent, a row that fits no slot costs a fixed insertion penalty, the match score is a Gaussian on the
+  row's log firing rate against the slot's rate profile); slot profiles are re-estimated from the assignments,
+  slots are added where at least 3 % of the trials insert a row at the same place, and adjacent slots that are
+  never co-assigned in a trial are merged (a split unit). The recovered slots are the unit IDs of the session. On
+  the twin recordings the recovery is scored against the true IDs (`row_accuracy`, by rate tercile;
+  `frac_units_one_slot`), and `cache` prints that table — the sparsest units are the hardest to align and the
+  least likely to pass the selection floor. Simulations (400 units, 300 trials, 10 % silent per trial, 0.3
+  log-normal rate jitter): row accuracy 0.90 / 0.98 / 1.00 for the low / mid / high rate terciles, 98 % of units in
+  one slot.
 * **Population representation** (`data.representation: population`, `data.population_groups` = 8): the alternative
   that needs no identity. Per trial and region, the units with at least one spike in the context or target window
   are ranked by their delay-epoch count (ties broken by the full count vector, so the ranking is a function of the

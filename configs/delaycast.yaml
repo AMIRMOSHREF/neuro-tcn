@@ -10,6 +10,10 @@ data:
   use_dataset_a: true
   use_dataset_b: true
   cache_dir: "cache"         # binned per-session tensors are stored here (safe to delete)
+  recover_identity: true     # exports without unit IDs that list every session's units in one fixed order minus the silent
+                             # ones (Data2): recover the identity of every row by sequence alignment (data/identity.py)
+  identity_iterations: 3     # refinement passes of the alignment (slot profiles re-estimated, missing slots added)
+  identity_min_support: 3    # trials that must insert a row at the same place before a new slot is created
   representation: units      # units: one row per recorded unit (needs unit identity across trials) | population: identity-free
                              # rate-quantile channels per region (works on the Data2 export; unit-level claims not applicable)
   population_groups: 8       # channels per region in the population representation

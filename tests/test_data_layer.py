@@ -737,7 +737,7 @@ def test_session_without_unit_identity_is_excluded(tmp_path, caplog):
         cls = ["Left", "Right"][i % 2]
         n = dict(base, ALM_L=3 + (i % 3))          # 3, 4, 5, 3, 4, 5 ... -> two thirds of the trials mismatch
         _write_b(tmp_path, i, cls, _to_split(_payload(rng, n, cls, t0=10.0 * i)))
-    cfg = _cfg(tmp_path)
+    cfg = _cfg(tmp_path, **{"data.recover_identity": False})     # without the alignment-based recovery
     with caplog.at_level(logging.ERROR, logger="delaycast.data.cache"):
         caches = build_cache(cfg, force=True)
     assert caches == []
@@ -1009,3 +1009,73 @@ def test_twin_unit_order_check_detects_preserved_order(tmp_path):
     assert order.frac_same_active_counts.iloc[0] == 1.0 and order.frac_identical_order.iloc[0] == 1.0
     assert order.frac_rows_identified.iloc[0] == 1.0 and order.order_consistency.iloc[0] == 1.0
     assert order.rho_pos_vs_unit_id.iloc[0] > 0.99
+
+
+# ----------------------------------------------------------------------------- unit identity recovery
+def _fixed_order_twin(tmp_path, rng, n, n_trials=24, seed_perm=3):
+    """Data session with every unit + IDs, and its Data2 export: one fixed (shuffled) order per region, silent
+    units dropped per trial, times relative to trial start, licks in the log."""
+    from delaycast.data.synthetic import _as_data2_export  # noqa: F401  (documentation of the real export)
+    perm_rng = np.random.default_rng(seed_perm)
+    log_rows, perm_by_region = [], {}
+    for i in range(1, n_trials + 1):
+        cls = ["Left", "Right"][i % 2]
+        pay = _payload(rng, n, cls, t0=20.0 * i)
+        # per-unit rates that differ between units (log-uniform) and a few silent units per trial
+        spikes = list(pay["spike_times"])
+        regions = np.asarray(pay["brain_region"]).astype(str)
+        for k in range(len(spikes)):
+            keep_frac = [0.05, 0.3, 0.6, 1.0, 1.0, 1.0][k % 6]
+            s = np.asarray(spikes[k], float)
+            spikes[k] = s[rng.random(len(s)) < keep_frac]
+        pay["spike_times"] = _object_array(spikes)
+        _write_a(tmp_path, "Session1", i, cls, pay)
+        # Data2 export: per region, a fixed permutation of the region's units, silent ones dropped
+        order = []
+        for r in REGIONS:
+            idx = np.flatnonzero(regions == REGION_LABELS[r])
+            if r not in perm_by_region:
+                perm_by_region[r] = perm_rng.permutation(len(idx))
+            order += [idx[j] for j in perm_by_region[r] if len(spikes[idx[j]])]
+        b = dict(pay)
+        b["unit_ids"] = np.asarray(pay["unit_ids"])[order]
+        b["brain_region"] = np.asarray(pay["brain_region"])[order]
+        b["spike_times"] = _object_array([spikes[k] - pay["trial_start"] for k in order])
+        _write_b(tmp_path, i, cls, _strip_licks(_to_split(b)))
+        licks = pay["left_lick_times"] if cls == "Left" else pay["right_lick_times"]
+        log_rows.append({"trial": i, "outcome": "hit", "trial_instruction": cls.lower(), "early_lick": "no early",
+                         "left_lick_times": str(licks.tolist()) if cls == "Left" else "[]",
+                         "right_lick_times": str(licks.tolist()) if cls == "Right" else "[]", "excluded": False, "photostim_onset": "N/A"})
+    _write_b_csv(tmp_path, log_rows)
+
+
+def test_identity_is_recovered_by_alignment_for_an_export_without_ids(tmp_path, caplog):
+    """The identity-less Data2 export with a fixed unit order is no longer excluded: its rows are assigned to
+    recovered slots, the session enters the units representation, and against the Data twin the slots are the
+    true units."""
+    from delaycast.data.cache import find_duplicate_sessions, twin_identity_validation
+
+    rng = np.random.default_rng(21)
+    n = {"ALM_L": 12, "ALM_R": 9, "STR_L": 9, "STR_R": 6}
+    _fixed_order_twin(tmp_path, rng, n)
+    cfg = _cfg(tmp_path)
+    with caplog.at_level(logging.INFO, logger="delaycast.data.cache"):
+        caches = build_cache(cfg, force=True)
+    assert sorted(c.dataset for c in caches) == ["A", "B"]
+    b = next(c for c in caches if c.dataset == "B")
+    assert b.qc_info["unit_alignment"] == "recovered"
+    assert b.qc_info["drop_reasons"].get("unit_count_mismatch", 0) == 0 and b.n_trials == 24
+    st = b.qc_info["identity_stats"]
+    assert st["frac_rows_assigned"] > 0.97
+    for r in REGIONS:                                   # slots ~ true units of the region (a few may be missing/split)
+        assert abs(b.n_units[r] - n[r]) <= 2, (r, b.n_units[r], n[r])
+    assert any("identity recovered by sequence alignment" in rec.message for rec in caplog.records)
+    dup = find_duplicate_sessions(caches)
+    assert len(dup) == 1
+    val = twin_identity_validation(caches, dup, cfg)
+    assert len(val) == 1
+    assert val.frac_rows_identified.iloc[0] == 1.0
+    assert val.row_accuracy.iloc[0] >= 0.95 and val.frac_units_one_slot.iloc[0] >= 0.9
+    # the recovered rasters carry the same spikes as the Data copy, unit for unit (matched by slot label)
+    a = next(c for c in caches if c.dataset == "A")
+    assert a.context["ALM_L"].astype(int).sum() == b.context["ALM_L"].astype(int).sum()

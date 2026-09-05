@@ -19,8 +19,15 @@ verdict. Where a `Data` session matches a `Data2` audited log by trial numbers, 
 run's Left/Right accuracy by behavioural outcome (hit / miss), because a decoder of the upcoming *action* is expected
 to fail more often on trials in which the animal licked against the instruction.
 
-**Population representation** (`data.representation: population`, runner switch `-Population`). The `Data2` export
-lost unit identity, so its seven non-duplicate sessions can only enter as identity-free channels: per trial and
+**Recovered unit identity.** The `Data2` export lost unit IDs but writes each session's units in one fixed order
+minus the silent ones; the cache recovers every row's identity by sequence alignment and validates it on the three
+recordings present in both trees (row accuracy against the true IDs, printed by `cache` and stored in
+`twin_identity_validation.csv`). The seven `Data2`-only sessions therefore enter the unit-level corpus and every
+prediction is tested on 11 sessions; the recovery accuracy on the twins is part of the evidence and must be reported
+next to the verdicts.
+
+**Population representation** (`data.representation: population`, runner switch `-Population`). The alternative
+that needs no identity at all — the seven `Data2`-only sessions enter as identity-free channels: per trial and
 region the active units are ranked by delay-epoch count and split into 8 rate-quantile groups whose summed counts
 are the channels (a pure function of the multiset of unit rows — identical for the `Data` and `Data2` exports of the
 same trial). Under this representation every arm uses all channels, so the predictions *about neurons* — **P1a, P1b,

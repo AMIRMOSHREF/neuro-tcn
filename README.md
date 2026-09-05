@@ -65,7 +65,24 @@ if (Test-Path outputs\delaycast\runs) { Remove-Item -Recurse -Force outputs\dela
 if (Test-Path cache\selection)       { Remove-Item -Recurse -Force cache\selection }
 ```
 
-### The `Data2` NPZ export has no unit identity — re-export it from NWB
+### The `Data2` NPZ export has no unit identity — recovered by sequence alignment (or re-exported from NWB)
+
+**Recovered automatically.** The three recordings present in both trees showed that the `Data2` export writes each
+session's units in **one fixed order** and merely omits the silent ones (order consistency 0.998 across trials,
+every row identified by its spike train). A trial's row list is therefore a subsequence of one master unit list per
+region, and `cache` recovers the identity of every row by sequence alignment (`data.recover_identity`,
+`src/delaycast/data/identity.py`): the master list starts as the trial with the most rows, every trial is aligned to
+it by a monotone dynamic programme whose match score is the row's log firing rate against the slot's rate profile
+(a unit keeps its rate from trial to trial), skipped slots cost the unit's probability of being silent, slots are
+added where enough trials insert a row at the same place, and slots that are never co-assigned in a trial are merged
+back. The recovered slots are unit IDs in every sense the cache needs. On the twin recordings `cache` prints the
+accuracy of the recovery against the true IDs (`row_accuracy`, split by the unit's rate tercile; the sparsest units
+are the hardest to align and the least likely to pass the selection floor) — that table is the evidence for using
+the recovery on the seven `Data2`-only sessions, which therefore enter the **unit-level** corpus:
+`.\scripts\run_delaycast.ps1` now runs on all 11 sessions. The first `cache` costs a few minutes per `Data2`
+session (the alignment, cached under `cache\<key>\identity\`).
+
+The NWB re-export below remains the exact alternative (unit IDs from the source file).
 
 The `Data2` trial files (`left_ALM_spikes`, `right_ALM_spikes`, … object arrays) contain **only the units that fired
 in that trial and no unit IDs**: the unit count changes from trial to trial (e.g. 1371 → 1551 within one session)
@@ -124,17 +141,11 @@ units keep their rank from trial to trial). With 8 groups the first run gave 0.7
 
 `cache` also prints, for the three recordings present in both trees, a unit-order table: every `Data2` row is
 identified by its spike train, and the table says whether the rows keep the `Data` order (`frac_identical_order`),
-whether they keep **one fixed order from trial to trial** (`order_consistency`: 1.0 means identity is recoverable
-for the seven `Data2`-only sessions by sequence alignment, about 0.5 means the order is re-drawn per trial and nothing
-can be aligned) and what they are sorted by (`rho_pos_vs_unit_id / rate / first_spike`). On the real data the rows
-are the same active units as `Data` but not in `Data` order. `inspect --npz-detail` prints the `session_path` the
-export came from (`sub-<id>/<session>_behavior+ecephys+image+ogen.nwb`, the DANDI layout): if those `.nwb` files are on
-disk, `scripts\export_nwb_trials.py --nwb-dir <root of the sub-* folders>` gives unit IDs for every trial, and that is
-the direct route to unit-level results on all 11 sessions:
-
-```powershell
-Get-ChildItem C:\PythonProject\Rodent -Recurse -Filter *.nwb | Select-Object FullName
-```
+whether they keep **one fixed order from trial to trial** (`order_consistency`) and what they are sorted by
+(`rho_pos_vs_unit_id / rate / first_spike`). On the real data the rows are the same active units as `Data`, not in
+`Data` order, but in one fixed order per session (consistency 0.998) — which is what the identity recovery above
+rests on. `inspect --npz-detail` prints the `session_path` the export came from (the DANDI layout); if those `.nwb`
+files are on disk, `scripts\export_nwb_trials.py --nwb-dir <root of the sub-* folders>` gives exact unit IDs.
 
 What it can and cannot test: the channels are *not neurons*, so there is nothing to select — every arm uses all
 channels, `select` and Figure 1 are skipped (Figure 2 shows the time-frequency content of all channels) and the report

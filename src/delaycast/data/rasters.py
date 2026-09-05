@@ -413,7 +413,8 @@ _spikes_by_region = spikes_by_region
 
 
 def load_trial_rasters(npz_path, cfg, metadata: dict | None = None,
-                       unit_index: dict[str, np.ndarray] | None = None) -> TrialRasters:
+                       unit_index: dict[str, np.ndarray] | None = None,
+                       row_ids: dict[str, np.ndarray] | None = None) -> TrialRasters:
     """Bin spikes into the context (delay) and target (response) windows defined by the config.
 
     Both rasters are uint8 count matrices produced by ``bin_units``; the context window ends at the go cue
@@ -425,6 +426,10 @@ def load_trial_rasters(npz_path, cfg, metadata: dict | None = None,
     ``qc['n_units_absent']``.  Lick times come from the NPZ when it has them and from the behavioural-log row
     (``metadata['left_lick_times']`` / ``['right_lick_times']``) otherwise; ``qc['lick_source']`` records which
     (``npz`` | ``csv`` | ``none``), because without any lick record the folder label cannot be verified.
+
+    ``row_ids`` (region -> one ID per row of this trial's file, ``-1`` = unknown) replaces the file's own unit
+    IDs: the recovered identities of an export without IDs (``delaycast.data.identity``); rows with ``-1`` are
+    dropped.
     """
     data = np.load(npz_path, allow_pickle=True)
     ep = read_epochs(data, metadata)
@@ -458,6 +463,14 @@ def load_trial_rasters(npz_path, cfg, metadata: dict | None = None,
         else 0
     )
     region_data = spikes_by_region(data)
+    if row_ids is not None:
+        for r in REGIONS:
+            spikes, _ = region_data[r]
+            ids = np.asarray(row_ids.get(r, np.full(len(spikes), -1)), dtype=int).ravel()
+            if len(ids) != len(spikes):
+                raise ValueError(f"{npz_path}: {len(ids)} recovered row IDs for {len(spikes)} rows of {r}")
+            keep = ids >= 0
+            region_data[r] = ([u for u, k in zip(spikes, keep) if k], ids[keep])
     region_data, spike_ref = resolve_spike_time_reference(region_data, ep, (ctx_start, tgt_stop), npz_path)
     context, target, uids = {}, {}, {}
     n_absent, n_extra = {}, {}
